@@ -8,9 +8,9 @@ Dynamic External Forces for Neural Implicit Reduced Fluid Simulations
 - Install blender
 - Download and install the flip fluids blender add on
 - Create a virtual environment
-    - `python3 -m venv venv`
+    - `virtualenv .venv`
 - Activate the virtual environment
-    - `source venv/bin/activate`
+    - `source .venv/bin/activate`
 - Install the requirements
     - `pip install -r requirements.txt`
 
