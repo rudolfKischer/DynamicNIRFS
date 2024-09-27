@@ -8,6 +8,9 @@ import random
 import mathutils
 import bpy
 import argparse
+import re
+import threading
+import time
 from datetime import datetime
 
 import bmesh
@@ -27,13 +30,13 @@ config = {
   "blender_version": ((3,1),(4,2)),
 
   # flip fluid parameters
-  "domain_dimensions": (20,5,10),
+  "domain_dimensions": (22,7,12),
   "domain_object_name": "Domain",
-  "domain_resolution": 200,
+  "domain_resolution": 65,
   "fluid_dimensions": (10,5,3.0),
   "fluid_position": (0,0,-2.0),
   "fluid_object_name": "Fluid",
-  "num_frames": 200,
+  "num_frames": 100,
   "simulation_method": "FLIP",
 }
 
@@ -57,17 +60,6 @@ def parse_args():
   args = parser.parse_args(argv)
   return args
 args = parse_args()
-# we want to initialize the scene
-# - initialize flip fluid boundary
-# - initialize simulation paramaters
-# - initialize fluid
-# - initialize container
-
-# we are going to then want to give motion to the tank for some number of sims
-# we can set this up to be read from a file
-
-# then we are going to want to run and bake the simulation
-# 
 
 
 
@@ -75,8 +67,6 @@ def str_to_version(version: str):
   return tuple(map(int, version.split(".")))
 def version_to_str(version: tuple):
   return ".".join(map(str, version))
-  
-
 
 def initialize_blender():
   # Blender version
@@ -115,7 +105,7 @@ def initialize_fluid_domain():
   domain_object.name = config["domain_object_name"]
   bpy.ops.flip_fluid_operators.flip_fluid_add()
   domain_object.flip_fluid.object_type = 'TYPE_DOMAIN'
-  domain_object.flip_fluid.domain.resolution = config["domain_resolution"]
+  domain_object.flip_fluid.domain.simulation.resolution = config["domain_resolution"]
   domain_object.flip_fluid.domain.simulation_method = 'FLIP'
   logger.info(f"Domain created. Parameters: scale={config['domain_dimensions']}, resolution={config['domain_resolution']}, frame_end={config['num_frames']}, simulation_method={config['simulation_method']}") 
 
@@ -210,24 +200,9 @@ def add_container_motion():
     else:
       i += 1
 
-
-
-  # remove key frames from the first half of the frames
-  # add a key frame at 0
-  # key_frames.append((1, 0))
-  # key_frames.append((int(0.2 * config["num_frames"]), 0))
-
-
-
   
   # log the key frames
   logger.info(f"Key frames: {key_frames}")
-      
-
-  # key_frames = [(int(kf[0]*config["num_frames"]), kf[1]) for kf in key_frames]
-  # make sure all key frames are set to 1 and not 0
-  key_frames = [(kf[0] if kf[0] > 0 else 1, kf[1]) for kf in key_frames]
-
   # set the key frames
   container_object = bpy.data.objects["Container"]
   for frame, x in key_frames:
@@ -249,15 +224,11 @@ def initialize_scene():
   initialize_fluid_container()
   add_container_motion()
 
-  # set the view finder camera looking down the y axis at the fluid domain
-  # bpy.ops.object.camera_add(location=(0, -10, 0), rotation=(1.5708, 0, 0))
-  # this is the view finder camera, not the camera for rendering, just for using blender
-  # we want to do the same for the view finder camera
   for area in bpy.context.screen.areas:
     if area.type == 'VIEW_3D':
       space = area.spaces.active
       region_3d = space.region_3d
-      # region_3d.view_location = (0, -10, 0)
+
 
       rotation = (1.5708, 0, 0)
       # convert to quaternion
@@ -265,14 +236,73 @@ def initialize_scene():
       region_3d.view_rotation = rotation
 
 
+def suppress_console_output():
+  sys.stdout.flush()
+  sys.stderr.flush()
+  devnull = os.open(os.devnull, os.O_WRONLY)
+  original_stdout_fd = os.dup2(devnull, 1)
+  original_stdout_fd = os.dup2(devnull, 2)
+  return original_stdout_fd, original_stdout_fd
+
+def restore_console_output(original_stdout_fd, original_stderr_fd):
+    # Flush any pending output
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+    # Restore stdout and stderr to their original file descriptors
+    os.dup2(original_stdout_fd, 1)
+    os.dup2(original_stderr_fd, 2)
+
+    # Close the duplicated file descriptors
+    os.close(original_stdout_fd)
+    os.close(original_stderr_fd)
+
 
 
 def bake_simulation(output_file_path):
+  #suppres console output
+  original_stdout_fd, original_stderr_fd = suppress_console_output()
+
+  domain_object = bpy.data.objects[config["domain_object_name"]]
+
+  # start another thread that monitors the cache directory for the bake
+  number_of_frames = config["num_frames"]
+
+
+  def monitor_bake_status():
+    start_time = datetime.now()
+    while True:
+      out_file_name = os.path.basename(output_file_path).split(".")[0]
+      cache_dir = os.path.join(os.path.dirname(output_file_path), f'{out_file_name}_flip_fluid_cache')
+      if os.path.exists(f'{cache_dir}/bakefiles'):
+        files = os.listdir(f'{cache_dir}/bakefiles')
+        baked_frames = len([f for f in files if re.match(r"\d+.bobj", f)])
+        logger.info(f"Baked frames: {baked_frames}/{number_of_frames} : {baked_frames/number_of_frames*100:.2f}%")
+
+        # write to status.txt
+        # get the cwd
+        cwd = os.getcwd()
+        with open(os.path.join(cwd, "status.txt"), "w") as f:
+          out_str = f"File: {output_file_path}\n"
+          out_str += f"Start Time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+          out_str += f"Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+          out_str += f"Baked frames: {baked_frames}/{number_of_frames} : {baked_frames/number_of_frames*100:.2f}%\n"
+          f.write(out_str)
+
+
+        if baked_frames >= number_of_frames - 1:
+          break
+      time.sleep(0.01)
+    logger.info(f"Simulation baked")
+  
+  # start the monitor thread
+  monitor_thread = threading.Thread(target=monitor_bake_status)
+  monitor_thread.start()
+
   bpy.context.scene.frame_start = 1
   bpy.context.scene.frame_end = config["num_frames"]
   # deselect everything and select the domain
   bpy.ops.object.select_all(action='DESELECT')
-  # select everything in the scene
   bpy.ops.object.select_all(action='SELECT')
   # selevt the domain
   bpy.context.view_layer.objects.active = bpy.data.objects[config["domain_object_name"]]
@@ -282,6 +312,11 @@ def bake_simulation(output_file_path):
   logger.info(f"Baking simulation")
   bpy.ops.flip_fluid_operators.bake_fluid_simulation_cmd()
   logger.info(f"Simulation baked")
+
+  monitor_thread.join()
+
+  # restore console output
+  restore_console_output(original_stdout_fd, original_stderr_fd)
 
 
 
@@ -302,8 +337,6 @@ def save_scene(output_file_path):
   bpy.ops.wm.save_as_mainfile(filepath=output_file_path)
   # log the output
   logger.info(f"Scene saved to: {os.path.join(args.output_folder, 'tank_2d_motion.blend')}")
-  
-
 
 def main():
 
@@ -316,12 +349,9 @@ def main():
   initialize_scene()
   save_scene(output_file_path)
   bake_simulation(output_file_path)
+
+
   log_capture.close()
-
-
-
-
-
   pass
 
 if __name__ == "__main__":
