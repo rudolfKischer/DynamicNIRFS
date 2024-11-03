@@ -167,3 +167,8 @@ cython_debug/
 #.idea/
 
 .venv/*
+
+*.bobj
+*.bbox
+**/data/
+*.zip

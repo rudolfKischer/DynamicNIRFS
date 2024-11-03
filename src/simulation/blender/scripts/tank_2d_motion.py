@@ -14,6 +14,7 @@ import time
 from datetime import datetime
 
 import bmesh
+import pathlib
 
 bpy.app.debug = False
 bpy.app.debug_wm = False
@@ -30,13 +31,13 @@ config = {
   "blender_version": ((3,1),(4,2)),
 
   # flip fluid parameters
-  "domain_dimensions": (22,7,12),
+  "domain_dimensions": (24,2,12),
   "domain_object_name": "Domain",
-  "domain_resolution": 65,
-  "fluid_dimensions": (10,5,3.0),
-  "fluid_position": (0,0,-2.0),
+  "domain_resolution":100,
+  "fluid_dimensions": (12,2,5),
+  "fluid_position": (0,0,-3.5),
   "fluid_object_name": "Fluid",
-  "num_frames": 100,
+  "num_frames": 200,
   "simulation_method": "FLIP",
 }
 
@@ -51,7 +52,7 @@ def parse_args():
   # get the cwd
   cwd = os.getcwd()
 
-  relative_path = os.path.join(cwd, "scenes")
+  relative_path = os.path.join(cwd, "data")
   parser.add_argument("--output_folder", 
                       type=str, 
                       help="Output folder for simulation data",
@@ -338,10 +339,19 @@ def save_scene(output_file_path):
   # log the output
   logger.info(f"Scene saved to: {os.path.join(args.output_folder, 'tank_2d_motion.blend')}")
 
-def main():
 
-  output_file_name = f"tank_2d_motion_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.blend"
-  output_file_path = os.path.join(args.output_folder, output_file_name)
+def create_new_trial(output_folder):
+  # use the folder name as the trial name
+  trial_name = os.path.basename(output_folder)
+  # output_folder / stamp / stamp.blend
+  trial_folder = output_folder
+  output_file_path = os.path.join(trial_folder, f"{trial_name}.blend")
+  if not os.path.exists(trial_folder):
+    try:
+      os.makedirs(trial_folder)
+    except OSError as e:
+      logger.error(f"Error creating output folder: {trial_folder}")
+      raise e
 
   log_capture = BlenderLogInterCeptor()
   initialize_blender()
@@ -350,8 +360,14 @@ def main():
   save_scene(output_file_path)
   bake_simulation(output_file_path)
 
-
   log_capture.close()
+
+  return trial_folder
+
+def main():
+
+
+  create_new_trial(args.output_folder)
   pass
 
 if __name__ == "__main__":
