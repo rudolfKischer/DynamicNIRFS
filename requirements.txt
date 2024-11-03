@@ -1,1 +1,11 @@
-bpy==4.1.0
+tqdm==4.62.3
+trimesh
+pyglet<2
+scipy
+
+pymeshlab
+torch
+numpy
+libigl
+pyvista
+
