@@ -69,6 +69,8 @@ def simplify_meshes(input_folder, output_folder):
       output_obj_files.append(output_file_name)
   return output_obj_files
 
+
+
 def unpack_and_simplify(input_sim_folder):
   # given an input
   # we need: input pkl file, obj file to unpack to, folder name to put simplified meshes, and then the output pkl file
@@ -96,6 +98,8 @@ def unpack_and_simplify(input_sim_folder):
       f.unlink()
   else:
     temp_simplified_folder.mkdir()
+
+  original_mesh_sequence = read_from_pickle(pkl_file)
   
   # unpack the pkl file to obj files
   unpack_pkl.unpack_pkl(pkl_file, temp_obj_folder)
@@ -103,6 +107,17 @@ def unpack_and_simplify(input_sim_folder):
   simplified_obj_files = simplify_meshes(temp_obj_folder, temp_simplified_folder)
   # pack the simplified obj files into a pkl file
   unpack_pkl.pack_pkl(temp_simplified_folder, output_pkl_file)
+
+  # read the simplified pkl file
+  simplified_mesh_sequence = read_from_pickle(output_pkl_file)
+  # overwrite the original pkl file, with the simplified vertices and faces, but leave everything else
+  # like accelertion and velocity the same
+  for i, frame in enumerate(original_mesh_sequence):
+    frame['vertices'] = simplified_mesh_sequence[i]['vertices']
+    frame['faces'] = simplified_mesh_sequence[i]['faces']
+  
+  # write the original_mesh_sequence to  output_pkl_file
+  write_to_pickle(original_mesh_sequence, output_pkl_file)
 
   # remove the temp obj folders
   for f in temp_obj_folder.iterdir():

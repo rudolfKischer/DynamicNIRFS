@@ -28,6 +28,9 @@ MANIFEST
 
 
 src/simulation/blender/scripts/scenes
+src/modeling/figures
+src/modeling/figures/*
+src/modeling/models
 */.DS_Store
 .DS_Store
 

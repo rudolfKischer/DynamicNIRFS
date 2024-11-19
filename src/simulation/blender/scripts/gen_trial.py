@@ -18,16 +18,16 @@ import shutil
 tank_2d_motion = 'tank_2d_motion.py'
 blend_to_mesh = 'blend_to_mesh.py'
 
-REDUCE_MESH = False
+REDUCE_MESH = True
 ZIP_RESULTS = True
 
-def gen_trial():
+def gen_trial(trial_name, phases):
 
   data_folder = pathlib.Path("data")
   # create if it does not exist
   data_folder.mkdir(exist_ok=True)
 
-  trial_name = f"tank_2d_motion_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+  
   # trial_name = 'tank_2d_motion_2024-11-02_21-27-14'
 
   # get the cwd 
@@ -46,28 +46,30 @@ def gen_trial():
   # subprocess.run(save_command, shell=True)
 
   # First command to bake the Blender scene
-  bake_command = [
-      "blender",
-      "--background",
-      "--python", tank_2d_motion,
-      "--",
-      "--output_folder", output_folder
-  ]
-  subprocess.run(bake_command, shell=False)
+  if 0 in phases:
+    bake_command = [
+        "blender",
+        "--background",
+        "--python", tank_2d_motion,
+        "--",
+        "--output_folder", output_folder
+    ]
+    subprocess.run(bake_command, shell=False)
 
   # Second command to convert the Blender scene to a mesh sequence
-  save_command = [
-      "blender",
-      "--background",
-      "--python", blend_to_mesh,
-      "--",
-      output_folder  # Pass the output folder as a positional argument
-  ]
-  subprocess.run(save_command, shell=False)
+  if 1 in phases:
+    save_command = [
+        "blender",
+        "--background",
+        "--python", blend_to_mesh,
+        "--",
+        output_folder  # Pass the output folder as a positional argument
+    ]
+    subprocess.run(save_command, shell=False)
   
   pickle_file_path = output_folder / f"{trial_name}.pkl"
 
-  if REDUCE_MESH:
+  if REDUCE_MESH and 2 in phases:
     # Reduce the number of vertices in the mesh sequence
     simplify_meshes.unpack_and_simplify(output_folder)
     # remove the original pickle file that is not called _simplified.pkl
@@ -75,6 +77,7 @@ def gen_trial():
       if f.suffix == ".pkl" and not "_simplified" in f.stem:
         f.unlink()
     print(f"Removed the original pickle file: {output_folder}")
+  if REDUCE_MESH:
     pickle_file_path = output_folder / f"{trial_name}_simplified.pkl"
     # Gather uniform random sdf samples from the mesh sequence
   
@@ -87,18 +90,18 @@ def gen_trial():
   # The failure occurs when torch is used in sampler.py
   # and simplify_meshes.py has pymeshlab imported as a dependency
   # my guess is that its a conflict between something in pymeshlab and torch, maybe numpy
-  sample_command = [
-      "python",
-      "sampler.py",
-      str(pickle_file_path),
-      "1000"
-  ]
+  if 3 in phases:
+    sample_command = [
+        "python",
+        "sampler.py",
+        str(pickle_file_path),
+        "1000"
+    ]
 
-  subprocess.run(sample_command, shell=False)
+    subprocess.run(sample_command, shell=False)
 
 
-
-  if ZIP_RESULTS:
+  if ZIP_RESULTS and 4 in phases:
       # zip everything up such that , the contents of the zip file
       # go into a zip file with the same name as the folder
       # and then that zip file goes into the same output folder
@@ -119,7 +122,16 @@ def gen_trial():
 
 def main():
   start_time = time.time()
-  gen_trial()
+  phases = [
+    # 0, 
+    1, 
+    2,
+    # 3,
+    # 4,
+  ]
+  # trial_name = f"tank_2d_motion_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+  trial_name = 'tank_2d_motion_2024-11-11_11-23-36'
+  gen_trial(trial_name, phases)
   elapsed_time = time.time() - start_time
   # convert to hours, minutes, seconds
   h = elapsed_time // 3600
