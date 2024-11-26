@@ -134,6 +134,10 @@ class EncodedDHNODEDataset(Dataset):
     
     return x, y
 
+
+
+
+
 def train(model,
           dataset,
           epochs, 
@@ -581,6 +585,365 @@ def train_odenet():
   test_auto_decoder(embeddings=Q_p)
 
 
+def get_lr_lambda(lr_schedule, epochs):
+  def lr_lambda(epoch):
+    for i, (p, lr) in enumerate(lr_schedule):
+      if epoch < epochs * p:
+        return lr
+    return lr_schedule[-1][1]
+  return lr_lambda
+
+def joint_train(
+    params,
+    ctx
+):
+  # Split data into training and validation sets #
+  # ! NOTE: How do we split the data for the ode model? removing random frames ruins sequences
+  # and removing frames at the end or begining is not a balanced split, (if we have multiple sequences, we can split over sequences)
+
+  # NOTE: Q: SDF Samples Only drawn from rollout sequence?
+  # NOTE: Q: When we get the joint loss, should we evaluate the sdf model on the odes predictions, if so, do we do all samples in the batches or just a subset?
+
+  # We want to be able to stop the training at any time, and save the results, in case we finish early , or its taking too long
+  # or theres a some other error
+
+
+  # loop for number of epochs
+  #  loop for number of rollouts
+  #    pick a frame from 0 to num_frames - rollout_length
+  #    loop for number of batches in rollouts
+  #       evaluate the sdf model
+  #       backprop loss for the sdf model
+  #    perform a rollout with the ode model
+  #    get the joint loss , which is the diff of the latent vec, as well as the 
+  #   backprop the joint loss
+  #   NOTE: the grad flow is as follows
+  #   - we get the loss for the ode model between its prediction, and the actual current vector
+  #   - then evaluate the sdf model on the odes predicted latent vector, on some number of samples and get the loss
+  #   - then combine the loss with the ode loss, and backprop the joint loss, to params, and to the latent vector
+  #   
+  #   then we store the loss in the loss history
+  #   then we plot the loss history
+
+  #NOTE: for now we will ignore val split, because val split is hard to do on ode
+
+  loss_history = {
+    "ode_loss": [],
+    "sdf_loss": [],
+    "joint_loss": []
+  }
+  epochs = params["train_params"]["epochs"]
+  batch_size = params["train_params"]["batch_size"]
+  tot_num_samples = ctx["num_frames"] * ctx["num_samples"]
+  num_batches = tot_num_samples // batch_size
+
+  # ode
+  ode_model = ctx["ode_model"]
+  ode_lr_schedule = params["ode"]["lr_schedule"]
+  ode_lr_schdule_fn = get_lr_lambda(ode_lr_schedule, epochs)
+  lr_init = ode_lr_schdule_fn(0)
+  ode_optimizer = params["train_params"]["optimizer"](ode_model.parameters(), lr=lr_init)
+  ode_scheduler = optim.lr_scheduler.LambdaLR(ode_optimizer, lr_lambda=ode_lr_schdule_fn)
+  ode_loss_fn = params["ode"]["loss_fn"]
+  rollout_schedule = params["ode"]["rollout_schedule"]
+
+  # sdf
+  sdf_model = ctx["deep_sdf_model"]
+  sdf_lr_schedule = params["deep_sdf"]["lr_scedule"]
+  sdf_lr_schdule_fn = get_lr_lambda(sdf_lr_schedule, epochs)
+  lr_init = sdf_lr_schdule_fn(0)
+  sdf_optimizer = params["train_params"]["optimizer"](sdf_model.parameters(), lr=lr_init)
+  sdf_scheduler = optim.lr_scheduler.LambdaLR(sdf_optimizer, lr_lambda=sdf_lr_schdule_fn)
+  sdf_loss_fn = params["deep_sdf"]["loss_fn"]
+
+
+
+  n_f = ctx["num_frames"]
+  n_s = ctx["num_samples"]
+
+  plotter = params["train_params"]["plotter"]
+
+  def get_k(epoch_p):
+    for i, (p, k) in enumerate(rollout_schedule):
+      if epoch_p < p:
+        return k
+    return rollout_schedule[-1][1]
+  
+  def get_batch(n, X_s, Y_s, code_ids, z, kn):
+    # we want to get the batch from the range_start to range_end of the frames
+    # then we want to get the flatten batch with the frame ids attached
+    # then we want to get the latent vectors for the batch, and left attach them ( just the q vectors)
+    # shape [frames, samples, 3] -> [batch_size, 4] -> [batch_size, embedding_len + 3]
+
+    # get the size of the tot samples from seq
+    tot_samples = X_s.shape[0]
+    b_ids = torch.randint(0, tot_samples, (n,))
+    # print(f'tot_samples: {tot_samples}')
+
+    # print(f'code_ids: {code_ids.shape}')
+    # print(f'b_ids: {b_ids.shape}')
+
+
+
+    b_code_ids = code_ids[b_ids]
+
+    # get the latent vectors and attach to X on the left
+    z_b = z(b_code_ids)
+    X_b = X_s[b_ids]
+    Y_b = Y_s[b_ids]
+
+    X_b = torch.cat((X_b, z_b), dim=1)
+    return X_b, Y_b, b_code_ids
+
+  D = ctx["samples"]
+  num_batches_per_rollout = params["train_params"]["batches_per_rollout"]
+  num_rollouts_per_epoch = num_batches // num_batches_per_rollout
+
+  
+
+  with tqdm(total=epochs * num_batches) as pbar:
+    iteration = 0
+    for epoch in range(epochs):
+      try:
+        epoch_p = epoch / float(epochs)
+        k_n = get_k(epoch_p) # rollout length
+        # start frame of rollout randomly pick start frame of rollout between 0 and n_f - k_n
+        # print(f'k_n: {k_n}')
+        # print(f'n_f: {n_f}')
+        z = ctx["z"]
+        z.requires_grad = True
+        cur_batch = 0
+        cur_rollout = 0
+        k = torch.randint(0, n_f - k_n, (1,)).item()
+        # print(f'k: {k}')
+        D_seq = D[k:k + k_n]
+        D_s_flat, code_ids = flatten_models_samples(D_seq)
+        X_s, Y_s = D_s_flat[:, :3], D_s_flat[:, 3].reshape(-1, 1)
+        for j in range(num_rollouts_per_epoch):
+          b_loss_history = {
+            "sdf_loss": [],
+          }
+
+          sdf_rollout_pred = []
+          for i in range(num_batches_per_rollout):
+            # we get the batch, selected from the frames in the rollout
+            X_b, Y_b, b_code_ids = get_batch(batch_size, X_s, Y_s, code_ids, z, k_n)
+            # sdf model
+            sdf_optimizer.zero_grad()
+            # print(f'X_b: {X_b.shape}')
+            # print(f'batch_size: {batch_size}')
+            Y_pred = sdf_model(X_b)
+            sdf_rollout_pred.append(Y_pred)
+            sdf_loss = sdf_loss_fn(Y_pred, Y_b)
+            sdf_loss.backward()
+            sdf_optimizer.step()
+            sdf_scheduler.step()
+            pbar.update(1)
+            iteration += 1
+            cur_batch += 1
+
+            b_loss_history["sdf_loss"].append((epoch, cur_batch, sdf_loss.item()))
+            # use scientific notation for lr
+            pbar.set_description(f"Epoch: {epoch}, SDF Loss: {sdf_loss.item():.2f} batch: {i}/{num_batches} cur_lr: {sdf_optimizer.param_groups[0]['lr']:.2e}")
+
+
+          #===============================sdf batches done=================================================================
+          # update the ode model, with latent vectors
+          # ode_batch_size 1 for now
+
+          total_batch_loss = np.sum([l[2] for l in b_loss_history["sdf_loss"]])
+          avg_batch_sdf_loss = np.mean([l[2] for l in b_loss_history["sdf_loss"]])
+          
+          ode_optimizer.zero_grad()
+          # shape [ode_batch_size, latent_dim]
+          Z_k = z(torch.tensor([k])).expand(batch_size, -1)
+          # attach number of steps for rollout in col 0
+          num_steps = torch.tensor([k_n]).expand(batch_size, 1)
+          ode_X_b = torch.cat((Z_k, num_steps), dim=1) # shape [ode_batch_size, latent_dim + 1]
+          # shape [ode_batch_size, k_n, latent_dim]
+          ode_Y_b = z(torch.tensor([k + k_n])).expand(batch_size, k_n, -1)
+          Z_p = ode_model(ode_X_b) # shape [ode_batch_size, k_n, latent_dim]
+
+          # print(f'Z_p: {Z_p.shape}')
+          # print(f'ode_Y_b: {ode_Y_b.shape}')
+          ode_loss = ode_loss_fn(Z_p, ode_Y_b)
+
+          ode_loss.backward()
+          ode_optimizer.step()
+          ode_scheduler.step()
+          cur_rollout += 1
+
+          # append loss to history
+          loss_history["ode_loss"].append((epoch * cur_rollout, ode_loss.item()))
+          loss_history["sdf_loss"].append((epoch * cur_rollout, avg_batch_sdf_loss))
+          loss_history["joint_loss"].append((epoch * cur_rollout, avg_batch_sdf_loss + ode_loss.item()))
+
+          # plot
+          # 
+          plotter.update(loss_history, epoch * cur_rollout)
+      except Exception as e:
+        #handle the case where there is a keyboard interrupt or some other error and save the model
+        print(f"Error: {e}")
+    
+    plotter.finish()
+
+
+    model = SDFDHNODEjoint(ode_model, sdf_model, ctx["z"])
+    # model.save("sdfdhnode_joint")
+    return loss_history, model  
+
+def ode_loss(Z_p, Z):
+  # shape = [N, num_steps, latent_dim * 2], N is the batch size
+
+  return torch.mean((Z_p - Z)**2)
+
+def joint_train_deep_sdf_odenet():
+  # we want to be able to jointly train the deep sdf model, and the ode model
+  # without the joint training, the sdf model learns a latent space that is not smooth and does not
+  # have the features of a hamiltonian space
+  # To train both models jointly we need to allow them to share the same latent space, and to back propogate the 
+  # error from the networks, so that they both modify the latent space, and not just the sdf model
+  # we also need to introduce joint loss, so that the models effect eachother during training
+
+  # because the sdf model is trained of batches of single point samples, and the ode model is trained on sequences of the
+  # latent codes, they cannot be trained at each step together
+  # instead we will have to train the sdf every step, and we do a ode rollout every ~10 steps/batches
+
+  # we we also want a schedule to increase rollout length over time 
+  # and we want random sampling of where to start the rollout from
+
+  # the sdf should be trained on the samples
+  # which have the form (id, x, y, z, sdf) -> (q_1, ...q_n, p_1, ...p_n, x, y, z, sdf)
+
+  # we will also want to model the loss of both models, and the joint loss of the models
+
+  # NOTE: things that still need including
+  # - fourier features
+  # - gaussian latent vectors during training
+
+  params = {
+    # sdf are samples are in a .pt file
+    # the shape of the tensor is (num_frames, num_samples, 4), 4 -> (x, y, z, sdf)
+    "sdf_data_path": "/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/simulation/blender/scripts/data/tank_2d_motion_2024-11-02_23-28-02/tank_2d_motion_2024-11-02_23-28-02_simplified_samples_1000.pt",
+    # this is the size of the latent space
+    # but note that the ode model will have a latent space of size 2 * latent_dim, for the velocity vectors
+    "embedding_len": 8,  
+    # these are the MLP dimensions for the models
+    # ===================================DEEP_SDF===========================
+    "deep_sdf": {
+      "layers": [256,256,256,128,128,128],
+      "lr_scedule": [
+        # (<percent of epoch, lr) , means the lr for epochs less than percent of epochs * lr
+        (1.0, 0.01),
+      ],
+      "loss_fn": clamped_l1_loss
+    } ,
+    #===================================ODE===========================
+    "ode": {
+      "layers": [128, 128],
+      "lr_schedule": [
+        (1.0, 0.1)
+      ],
+      "rollout_schedule": [
+        # (<percent of epoch, rollout length)
+        (0.25, 10),
+        (0.5, 20),
+        (0.75, 35),
+        (1.0, 32)
+      ],
+      "gamma": 0.1,
+      "m": 1.0,
+      "integrator": RK4,
+      "loss_fn": ode_loss
+    },
+    #==============================================================
+    "train_params": {
+      "epochs": 10,
+      "batch_size": 64,
+      "val_split": 0.2,
+      "batches_per_rollout": 50,
+      "plotter": LossPlotter(),
+      "optimizer": optim.Adam,
+    },
+  }
+
+  # training context for keeping track of data
+  ctx = {} # shhh, I dont care if this is bad practice
+
+
+  # Load Data
+  # - load sdf samples, and flatten and attach the frame id to the samples (num_frames, num_samples, 4) -> (num_frames * num_samples, 5)
+
+  sdf_sample_pt = torch.load(params["sdf_data_path"])
+  sdf_sample_pt = sdf_sample_pt[0:150, :, :]
+  ctx["num_frames"] = sdf_sample_pt.shape[0]
+  ctx["num_samples"] = sdf_sample_pt.shape[1]
+  ctx["samples"] = sdf_sample_pt
+  # ctx["samples_flat"], ctx["code_ids"] = flatten_models_samples(sdf_sample_pt)
+
+
+  # initialize latent vectors
+  ctx["z"] = nn.Embedding(ctx["num_frames"], params["embedding_len"] * 2)
+  # initialize with random values
+  nn.init.normal_(ctx["z"].weight, mean=0, std=0.1)
+  # set idx for p and q
+  ctx["q_idx"] = (0, params["embedding_len"])
+  ctx["p_idx"] = (params["embedding_len"], params["embedding_len"] * 2)
+
+
+  # Init Models
+  
+  # initialize deep_sdf model
+  # input = (q, x, y, z)
+  deep_sdf_mlp = DeepSDFDecoder(
+    params["deep_sdf"]["layers"], 
+    input_dim=(params["embedding_len"] * 2 + 3),
+    output_dim=1)
+  q_view = ctx["z"].weight[:, ctx["q_idx"][0]:ctx["q_idx"][1]]
+  # this might be wrong way to do view of embeddings
+  deep_sdf_model = AutoDecoder(ctx["num_frames"], params["embedding_len"], deep_sdf_mlp, embedding_w=q_view) 
+  ctx["deep_sdf_model"] = deep_sdf_model
+
+
+  # initialize ode model
+  # - initialize the integrator
+  # - initialize the ode model
+  
+  ode_mlp = MLP(
+    input_dim=params["embedding_len"] * 2,
+    output_dim=1, 
+    layer_dims=params["ode"]["layers"]
+    )
+  integrator = params["ode"]["integrator"](ode_mlp)
+  dhnode = DHNODE(ode_mlp,
+                  gamma=params["ode"]["gamma"],
+                  m=params["ode"]["m"]
+                  )
+  ode_model = DHNODEIntegrator(dhnode, integrator, ctx["z"])
+  ctx["ode_model"] = ode_model
+
+  def joint_loss(ode_loss, sdf_loss, lambda_ode=1):
+    return lambda_ode * ode_loss + sdf_loss
+  
+  params["train_params"]["loss_fn"] = joint_loss
+    
+  # initialize datasets for training
+
+  
+  # train the models
+  loss_history, model = joint_train(params, ctx)
+  
+  # evaluate the models
+
+  # save the models
+
+
+
+
+
+
+
+
 
 
 
@@ -673,7 +1036,8 @@ def main():
   # train_deep_sdf()
   # train_deep_sdf_auto_decoder()
   # test_auto_decoder()
-  train_odenet()
+  # train_odenet()
+  joint_train_deep_sdf_odenet()
 
   
   

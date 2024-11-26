@@ -91,14 +91,16 @@ class AutoDecoder(nn.Module):
   This will encourage the decoder to codes closer together, if their samples are similar.
   """
 
-  def __init__(self, num_codes, code_dim, mlp):
+  def __init__(self, num_codes, code_dim, mlp, embedding_w=None):
     super(AutoDecoder, self).__init__()
     self.num_codes = num_codes
     self.code_dim = code_dim
     self.mlp = mlp
-
     self.codes = nn.Embedding(num_codes, code_dim)
-    nn.init.normal_(self.codes.weight, mean=0, std=0.1)
+    if embedding_w is not None:
+      self.codes.weight = nn.Parameter(embedding_w)
+    else:
+      nn.init.normal_(self.codes.weight, mean=0, std=0.1)
   
   def load(self, model_name):
     # self.mlp.load(model_name)
@@ -153,11 +155,12 @@ class DHNODE(nn.Module):
     self.m = m
     self.latent_dim = mlp.input_dim
     if not gamma:
-      self.gamma = torch.eye(self.latent_dim)
       # multiply by 0.1
-      self.gamma *= 0.1
+      self.gamma = 0.1
+    self.gamma = torch.eye(self.latent_dim) * self.gamma
     if not m:
-      self.m = torch.eye(self.latent_dim)
+      self.m = 1.0
+    self.m = torch.eye(self.latent_dim) * self.m
     
     self.m_inv = torch.inverse(self.m)
     self.model_folder = model_folder
@@ -224,7 +227,7 @@ class DHNODEIntegrator(nn.Module):
     self.model = model
     self.integrator = integrator
     # disable grad for embeddings
-    shared_embedding.weight.requires_grad = False
+    # shared_embedding.weight.requires_grad = False
 
     self.embeddings = shared_embedding
 
@@ -249,12 +252,52 @@ class DHNODEIntegrator(nn.Module):
     Z = []
 
     for i in range(x.shape[0]):
-      num_steps = x[i, 0, -1]
-      z_0 = x[i, 0, :-1]
-      z_0 = z_0.reshape(1, -1)
+      num_steps = x[i,-1]
+      z_0 = x[i,:-1]
+      # z_0 = z_0.reshape(1, -1)
       # print(f'z_0_shape: {z_0.shape}')
       # print(f'num_steps_shape: {num_steps.shape}')
       z_t = self.integrator.integrate(z_0, num_steps=int(num_steps))
       Z.append(z_t)
     Z = torch.stack(Z, dim=0)
     return Z # [m, num_steps, latent_dim * 2]
+
+class SDFDHNODEjoint(nn.Module):
+  """
+  The SDFDHNODEjoint model is used to train the DHNODE model
+  X = (q, p , num_steps) , where q is the position, p is the velocity, and num_steps is the number of rollout steps into the future
+  Z = (Q_h, P_h) , where q_h is the position, and p_h is the velocity at timestep t + num_steps
+
+  Q_h = [q_0, q_1, q_2, ..., q_h]
+  P_h = [p_0, p_1, p_2, ..., p_h]
+
+  l = |Z - Z_h|^2
+
+  Z = [z_0, z_1, z_2, ..., z_h]
+
+  """
+  def __init__(self, dhnode_integrator, 
+               sdf_decoder,
+               embedding, 
+               model_folder="models", time_stamp_saved_model=True):
+    super(SDFDHNODEjoint, self).__init__()
+    self.dhnode_integrator = dhnode_integrator
+    self.sdf_decoder = sdf_decoder
+    self.embedding = embedding
+    self.model_folder = model_folder
+    self.time_stamp = time_stamp_saved_model
+  
+  def forward(self, x):
+    # will look something like stepping with the ode , and integrator, and then getting 
+    # the sdf samples, but for now this is just a placeholder
+    pass
+  
+  def save(self, model_name):
+    time_str = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    output_path = f"{self.model_folder}/{model_name}_sdf_dhnode_joint_{time_str}.pt"
+    if self.time_stamp:
+      output_path = f"{self.model_folder}/{model_name}_sdf_dhnode_joint_{time_str}.pt"
+    torch.save(self.state_dict(), output_path)
+  
+  def load(self, model_path):
+    self.load_state_dict(torch.load(model_path))
