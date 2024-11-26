@@ -8,4 +8,6 @@ torch
 numpy
 libigl
 pyvista
+seaborn
+pillow
 

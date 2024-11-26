@@ -13,6 +13,11 @@ import PIL
 import shutil
 import math
 
+from plotters import *
+from integrators import *
+from networks import *
+
+
 if torch.backends.mps.is_available():
   device = torch.device("mps")  # Use the Metal Performance Shaders (MPS) backend on Apple Silicon
   print("Using MPS for GPU acceleration")
@@ -40,123 +45,10 @@ we want to try training an MLP to predict the sdf of a single mesh as a test.
 """
 
 
-activation_functions = {
-  "relu": nn.ReLU(),
-  "tanh": nn.Tanh()
-}
-
-class MLP(nn.Module):
-  """
-  PARAMS:
-  - layer_dims: list of integers, the dimensions of the hidden layers
-  - input_dim: int, the dimension of the input
-  - output_dim: int, the dimension of the output
-  """
-  def __init__(self,
-                layer_dims,
-                input_dim,
-                output_dim,
-                hidden_activation="relu",
-                output_activation="tanh",
-                model_folder="models",
-                weight_norm=True,
-                time_stamp_saved_model=True
-                ):
-    super(MLP, self).__init__()
-    self.input_dim = input_dim
-    self.output_dim = output_dim
-    self.layer_dims = layer_dims
-    self.activation = activation_functions[hidden_activation]
-    self.output_activation = activation_functions[output_activation]
-    self.model_folder = model_folder
-    self.time_stamp = time_stamp_saved_model
-    self.weight_norm = weight_norm
-
-    self.init_weights()
-  
-  def init_weights(self):
-    self.layers = nn.ModuleList()
-    self.layers.append(nn.Linear(self.input_dim, self.layer_dims[0]))
-    for i in range(1, len(self.layer_dims)):
-      layer = nn.Linear(self.layer_dims[i-1], self.layer_dims[i])
-      if self.weight_norm:
-        layer = nn.utils.weight_norm(layer)
-      self.layers.append(layer)
-    layer = nn.Linear(self.layer_dims[-1], self.output_dim)
-    if self.weight_norm:
-      layer = nn.utils.weight_norm(layer)
-    self.layers.append(layer)
-
 
     
 
 
-  def forward(self, x):
-    for layer in self.layers[:-1]:
-      x = self.activation(layer(x))
-    x = self.output_activation(self.layers[-1](x))
-    return x
-  
-  def save(self, model_name):
-    time_str = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-    output_path = f"{self.model_folder}/{model_name}.pt"
-    if self.time_stamp:
-      output_path = f"{self.model_folder}/{model_name}_{time_str}.pt"
-    torch.save(self.state_dict(), output_path)
-  
-  def load(self, model_name):
-    self.load_state_dict(torch.load(f"{self.model_folder}/{model_name}.pt"))
-  
-
-class DeepSDFDecoder(MLP):
-  def __init__(self, layer_dims,
-                input_dim=3,
-                output_dim=1,
-                **kwargs):
-    super(DeepSDFDecoder, self).__init__(layer_dims, input_dim, output_dim, **kwargs)
-
-  def forward(self, x):
-    return super(DeepSDFDecoder, self).forward(x)
-  
-
-
-
-class AutoDecoder(nn.Module):
-  """
-  An auto decoder works, by attaching a code to each sample in a particular set of the samples that in the same category.
-  The code is shared by all the samples in the category during training.
-  The codes are initialized to random values. But during training,  we back propogate the loss from the decoder to the code.
-  This will encourage the decoder to codes closer together, if their samples are similar.
-  """
-
-  def __init__(self, num_codes, code_dim, mlp):
-    super(AutoDecoder, self).__init__()
-    self.num_codes = num_codes
-    self.code_dim = code_dim
-    self.mlp = mlp
-
-    self.codes = nn.Embedding(num_codes, code_dim)
-    nn.init.normal_(self.codes.weight, mean=0, std=0.1)
-  
-  def load(self, model_name):
-    # self.mlp.load(model_name)
-    self.load_state_dict(torch.load(model_name))
-
-  def save(self, model_name):
-    self.mlp.save(model_name)
-    # save this model as well
-    time_str = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-    output_path = f"{self.mlp.model_folder}/{model_name}_auto_decoder_{time_str}.pt"
-    if self.mlp.time_stamp:
-      output_path = f"{self.mlp.model_folder}/{model_name}_auto_decoder_{time_str}.pt"
-    torch.save(self.state_dict(), output_path)
-
-
-  def get_code(self, code_idx):
-    return self.codes(code_idx)
-
-  def forward(self, x):
-    return self.mlp(x)
 
 class EncodedDataset(Dataset):
 
@@ -179,307 +71,71 @@ class EncodedDataset(Dataset):
     combined = torch.cat((x, code), dim=0)
     # combined = x
     return combined, y
+
+class EncodedDHNODEDataset(Dataset):
+
+  def __init__(self, num_steps, decoder, latent_dim, training=True):
+    self.num_steps = num_steps
+    self.decoder = decoder
+    self.embeddings = decoder.embeddings
+    self.latent_dim = latent_dim
+    self.num_of_embeddings = self.embeddings.weight.shape[0]
+    self.training = training
+
+    self.stead_state_padding = int(self.num_of_embeddings * 0.1)
   
+  def __len__(self):
+    return self.num_of_embeddings
 
-class LossPlotter():
-  """
-  Used to show loss while training a model.
-  We can have an active plotter while the model is updating.
-  """
-  def __init__(self, 
-                fig_folder="figures",
-                fig_name="loss_plot.png",
-                plot_title="Loss Plot",
-                plot_x_label="Steps",
-                plot_y_label="Loss",
-                ):
-    self.loss_history = None
-    self.fig_folder = fig_folder
-    self.fig_name = fig_name
-    self.plot_title = plot_title
-    self.plot_x_label = plot_x_label
-    self.plot_y_label = plot_y_label
+  def __getitem__(self, idx):
+    # idx may be a  slice
+    # X = (q, p, num_steps)
+    # Y = (Q_h, P_h) , shape = (num_steps, latent_dim * 2)
+    # to get Y we just get the codes from idx to idx + num_steps
+    # print(f'embedding_shape: {self.embeddings.weight.shape}') 
+
+    if self.training:
+      idx = torch.randint(0, self.num_of_embeddings, (1,)).item()
+
+    code = self.embeddings(torch.tensor([idx]))
+    # print(f'code shape: {code.shape}') # [m, 32]
+    # print(f'num_steps: {torch.tensor([self.num_steps]).shape}') # [1]
+    # expand the num steps to be [1, m] where m is the batch size
+
+    cur_steps = self.num_steps
+
+    num_steps = torch.tensor([cur_steps]).expand(code.shape[0], 1)
+    x = torch.cat((code, num_steps), dim=1)
+    # print(f'x_shape_ dataset: {x.shape}')
+    start = idx
+    end = idx + cur_steps
+
+    end = min(end, self.num_of_embeddings)
+    # pad with the last id if idx + cur_steps > num_of_embeddings
+    # pad it (idx + cur_steps - num_of_embeddings) times
 
 
-    if not os.path.exists(fig_folder):
-      os.makedirs(fig_folder)
+    y = self.embeddings(torch.arange(start, end))
 
-  
-  def plot(self):
-    plt.figure(figsize=(10, 10))
-    # format: (epoch, batch, loss)
-    # X axis: steps
-    # Y axis: loss
+    last_code = self.embeddings(torch.tensor([end - 1]))
 
-    for label, loss_history in self.loss_history.items():
-      steps = [i for i in range(len(loss_history))]
-      losses = [l[-1] for l in loss_history]
-      sns.lineplot(x=steps, y=losses, label=label)
+    if (idx + cur_steps) > self.num_of_embeddings:
+      padding = idx + cur_steps - self.num_of_embeddings
+      y = torch.cat((y, last_code.expand(padding, -1)), dim=0)
     
-    plt.xlabel(self.plot_x_label)
-    plt.ylabel(self.plot_y_label)
-    plt.title(self.plot_title)
-    plt.legend()
-    plt.savefig(f"{self.fig_folder}/{self.fig_name}")
-    plt.close()
+    # # the steady state is the first code in the list of codes
+    # steady_state = self.embeddings(torch.tensor([0]))
+
+    # # we append this to the end of the y tensor
+    # y = torch.cat((y, steady_state.expand(self.stead_state_padding, -1)), dim=0)
 
 
-  def update(self, data, epoch):
-    self.loss_history = data
-    self.plot()
-  
-  def finish(self):
-    pass
-
-class SDFPlotter():
-
-  """
-  We want to evaluate the model at every point in the dataset while its learning
-  and plot the results to create a gif of the model learning.
-  We will also save the the results at each step to a pt file.
-  the sdf plotter will need:
-  - the model
-  - the dataset
-  - the output folder
-  - snapshot_folder_name
-  (assume 2d points for now, and ignore y axis)
-  at each update, we evaluate the model at every point in the dataset
-  then we add the evaluated samples to the frame samples
-  we create a snapshot folder in the output folder
-  then we create a figure where we plot the points in 2d space using the the coordinates 
-  and use the sdf value to color the points
-  then after were done we combine all the frames into a gif
-  """
-  def __init__(self, model, 
-               dataset, 
-               epochs,
-               num_of_snapshots = 100,
-               output_folder = "figures",
-               snapshot_folder_name="sdf_snapshots",
-               remove_snapshots=False,
-               plot_3d=True
-               ):
-    self.model = model
-    self.dataset = dataset
-    self.X, self.y = dataset
-    self.X_orig = self.X
-    self.y_orig = self.y
-    self.plot_3d = plot_3d
-    
-    # create new X data set with more samples
-    # keep the y the same
-    # we want regulare samples over 0 to 1 in x and z
-    # if N is the number of samples per dim, then we will have N * N samples
-    N = 40 if plot_3d else 100
-    # # generate the new X data, y axis as 0.5 (axis 1)
-    vals = np.linspace(0, 1, N)
-    X = np.array(np.meshgrid(vals, [0.5], vals)).T.reshape(-1, 3)
-    if plot_3d:
-      # add the y axis as well
-      X = np.array(np.meshgrid(vals, vals, vals)).T.reshape(-1, 3)
 
     
-    self.X = torch.tensor(X).float()
+    return x, y
 
 
 
-
-    self.output_folder = output_folder
-    self.snapshot_folder_name = snapshot_folder_name
-
-    # self.evaluations = self.evaluate_model()
-    num_samples = self.X.shape[0]
-    y_e = self.model(self.X).reshape((1, num_samples, 1)).detach()
-    X_e = self.X.reshape((1, num_samples, 3)).detach()
-    self.evaluations = torch.cat((X_e, y_e), dim=2)
-
-    self.snapshot_files = []
-    self.snapshot_folder = f"{output_folder}/{snapshot_folder_name}"
-    if not os.path.exists(self.snapshot_folder):
-      os.makedirs(self.snapshot_folder)
-    self.snapshot_interval = max(epochs // num_of_snapshots, 1)
-    self.num_of_snapshots = num_of_snapshots
-    self.epochs = epochs
-    self.step_count = 0
-    self.snapshot_count = 0
-    self.remove_snapshots = remove_snapshots
-
-
-
-  
-  def evaluate_model(self):
-    num_samples = self.X.shape[0]
-    y_e = self.model(self.X).reshape((1, num_samples, 1)).detach()
-    # use the original labels for testing
-    # y_e = self.y.reshape((1, num_samples, 1)).detach()
-    X_e = self.X.reshape((1, num_samples, 3)).detach()
-    eval_pt_tensor = torch.cat((X_e, y_e), dim=2)
-    return eval_pt_tensor
-  
-  def plot_snapshot_3d(self, eval_pt_tensor, epoch):
-    # we want to similiar to the 2d plot
-    # but our data points ore in the unit cube
-
-    # set the positions of the points to 0,0,0 if the sdf value is positive
-    # the sdf val is in the 4th column
-    # reshape the original
-    original_pt_tensor = torch.cat((self.X_orig.reshape((1, self.X_orig.shape[0], 3)), self.y_orig.reshape((1, self.y_orig.shape[0], 1))), dim=2)
-
-    # but shift their x values by + 1.0
-    original_pt_tensor[0, :, 0] += 1.0
-    # add the original labels to the plot as well
-    eval_pt_tensor = torch.cat((eval_pt_tensor, original_pt_tensor), dim=1)
-
-
-    clamp_val =0.005
-    eval_pt_tensor[0, :, 0][eval_pt_tensor[0, :, 3] > clamp_val] = 0
-    eval_pt_tensor[0, :, 1][eval_pt_tensor[0, :, 3] > clamp_val] = 0
-    eval_pt_tensor[0, :, 2][eval_pt_tensor[0, :, 3] > clamp_val] = 0
-
-
-
-
-
-    fig = plt.figure(figsize=(20, 20))
-    ax = fig.add_subplot(111, projection='3d')
-
-    ax.set_box_aspect(aspect=[2, 1, 1])
-
-    # remove border from figure and zoom in
-    ax.dist = 3
-
-
-    # fix axis between 0 and 1
-
-    # adjust view angle
-    ax.view_init(elev=20, azim=100)
-
-    norm = plt.Normalize(-0.01, 0.00)
-
-    ax.set_xlim(0, 2)
-    ax.set_ylim(0, 1)
-    ax.set_zlim(0, 1)
-
-    scatter = ax.scatter(eval_pt_tensor[0, :, 0].numpy(), 
-                          eval_pt_tensor[0, :, 1].numpy(),
-                          eval_pt_tensor[0, :, 2].numpy(),
-                          c=eval_pt_tensor[0, :, 3].numpy(),
-                          cmap="coolwarm",
-                          s=250,
-                          linewidths=0,
-                          norm=norm,
-                          # make filled circles markers
-                          marker="o"
-
-                          )
-    
-
-
-    ax.set_title(f"Epoch: {epoch}")
-    output_path = f"{self.snapshot_folder}/epoch_{epoch}.png"
-    try:
-      plt.savefig(output_path)
-      self.snapshot_files.append(output_path)
-    except Exception as e:
-      print(f"Error saving snapshot: {e}")
-    plt.close()
-  
-  def plot_snapshot(self, eval_pt_tensor, epoch):
-    # use the blue red color map
-    # plot the points in 2d space
-    # use the sdf value to color the points
-    # x and z axis are between 0 and 1, assume 2d points
-    # we plot them over x and y axis on the plot
-    # we use the sdf value to color the points
-    plt.figure(figsize=(10, 10))
-    x = eval_pt_tensor[0, :, 0].numpy()
-    z = eval_pt_tensor[0, :, 2].numpy()
-    sdf = eval_pt_tensor[0, :, 3].numpy()
-    # set the cool warm range for the sdf values [-0.1, 0.1]
-    clamp_dist = 0.1 * 0.5
-    sns.scatterplot(x=x, y=z, 
-                    hue=sdf, 
-                    palette="coolwarm", 
-                    hue_norm=(-clamp_dist, clamp_dist),
-                    legend=False,
-                    # increase the point size
-                    s=400,
-                    # make them squares, no border
-                    marker="s", linewidth=0
-                    )
-    plt.title(f"Epoch: {epoch}")
-    output_path = f"{self.snapshot_folder}/epoch_{epoch}.png"
-    try:
-      plt.savefig(output_path)
-      self.snapshot_files.append(output_path)
-    except Exception as e:
-      print(f"Error saving snapshot: {e}")
-    plt.close()
-
-  
-  def update(self, data, epoch):
-    self.step_count += 1
-    # self.model = model
-    # self.y = y_e
-
-    # we dont need the loss data for this plotter
-    target_step = int(self.epochs *((math.log((self.num_of_snapshots - self.snapshot_count) + 1) / math.log(self.num_of_snapshots + 1))))
-
-    # reverse log frequency
-
-    if self.step_count < (self.epochs - target_step):
-      return
-    self.snapshot_count += 1
-    
-
-    # evaluate the model
-    new_eval = self.evaluate_model()
-    # add the new evaluation to the old one
-    self.evaluations = torch.cat((self.evaluations, new_eval), dim=0)
-    # plot the snapshot
-    if self.plot_3d:
-      self.plot_snapshot_3d(new_eval, epoch)
-    else:
-      self.plot_snapshot(new_eval, epoch)
-    # delete 
-
-  
-  def finish(self):
-    # combine the snapshots into a gif
-    images = []
-    output_path = f"{self.output_folder}/{self.snapshot_folder_name}.gif"
-    for cur_file in self.snapshot_files:
-      try:
-        images.append(PIL.Image.open(cur_file))
-      except Exception as e:
-        print(f"Error opening snapshot file: {e}")
-    # make sure theres a pause before looping by repeating the last frame
-    for i in range(50):
-      images.append(images[-1])
-    images[0].save(output_path, save_all=True, append_images=images[1:], duration=30, loop=0)
-    if self.remove_snapshots:
-      shutil.rmtree(self.snapshot_folder)
-    print(f"Snapshot gif saved to {output_path}")
-
-
-
-class LossSDFPlotter():
-
-  def __init__(self, sdf_plotter, loss_plotter):
-    self.sdf_plotter = sdf_plotter
-    self.loss_plotter = loss_plotter
-
-  def update(self, loss_data, epoch):
-    self.sdf_plotter.update(loss_data, epoch)
-    self.loss_plotter.update(loss_data, epoch)
-  
-  def finish(self):
-    self.sdf_plotter.finish()
-    self.loss_plotter.finish()
-
-
-
-  
 
 
 def train(model,
@@ -692,18 +348,21 @@ def train_deep_sdf_auto_decoder():
   bunny_samples = "/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/simulation/blender/scripts/stanford-bunny_samples_1000.pt"
   output_name = 'decoder_test'
 
-  print(f"Loading data from {tank_samples}")
-  tank_pt_tensor = torch.load(tank_samples)
-  bunny_pt_tensor = torch.load(bunny_samples)
+  samples_file_name = tank_samples
+
+  print(f"Loading data from {samples_file_name}")
+  # tank_pt_tensor = torch.load(tank_samples)
+  # bunny_pt_tensor = torch.load(bunny_samples)
+  pt_tensor = torch.load(samples_file_name)
 
   # get just the first frames
-  tank_pt_tensor_1 = tank_pt_tensor[0:100, :, :]
+  # tank_pt_tensor_1 = tank_pt_tensor[0:100, :, :]
   # tank_pt_tensor_2 = tank_pt_tensor[99:100, :, :]
 
-  bunny_pt_tensor = bunny_pt_tensor[0:1, :, :]
+  # bunny_pt_tensor = bunny_pt_tensor[0:1, :, :]
 
   # combine the two datasets
-  pt_tensor = tank_pt_tensor_1
+  pt_tensor = pt_tensor[0:100, :, :]
   # pt_tensor = torch.cat((tank_pt_tensor_1, bunny_pt_tensor), dim=0)
   # pt_tensor = torch.cat((pt_tensor, tank_pt_tensor_2), dim=0)
 
@@ -739,7 +398,7 @@ def train_deep_sdf_auto_decoder():
   loss_fn = clamped_l1_loss
   optimizer = optim.Adam(model.parameters(), lr=0.00005)
   batch_size = 1024
-  epochs = 100
+  epochs = 30
   loss_plotter = LossPlotter()
   plotter = loss_plotter
 
@@ -779,7 +438,7 @@ def train_deep_sdf_auto_decoder():
   # we want the first dimension to be used to index into the specific model
   # we want the second dimension to be the samples, and the third to be the the input or output
   num_samples = pt_tensor.shape[1]
-  num_models = pt_tensor.shape[0]
+  num_models = pt_tensor.shape[0] #num_models : num_frames
   y_e = y_e.reshape((num_models, num_samples, 1)).detach()
   print(X_encoded.shape)
   X_e = X_encoded[:, :3].reshape((num_models, num_samples, 3)).detach()
@@ -792,17 +451,596 @@ def train_deep_sdf_auto_decoder():
   torch.save(eval_pt_tensor, eval_pt_tensor_path)
   print(f"Model evaluation saved to {eval_pt_tensor_path}")
 
+  # save a new version of the samples, but with the codes included so they can be used later
+  # we want to save it to the same folder as the original samples file
+  
+  encoded_samples_path = samples_file_name.replace(".pt", f"_encoded_{output_model_name}.pt")
+  # we want the output to be F X E where F is the number of frames, and E is the embedding length
+  print(f'pt_tensor_shape: {pt_tensor.shape}') # (num_models, num_samples, 4)
+  # so we have to get the codes from the model
+  encoded_pt_tensor = torch.zeros([num_models, embedding_len])
+  for i in range(num_models):
+    code = model.get_code(torch.tensor(i))
+    encoded_pt_tensor[i] = code
+  
+  # save the encoded samples
+  torch.save(encoded_pt_tensor, encoded_samples_path)
 
 
-# def resample_autodecoder():
 
-#   model_file = "/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/modeling/models/autodecoder_tank_2d_motion.pt"
-#   model = AutoDecoder(1, 1, None)
-#   model.load(model_file)
+
+
+
+def train_odenet():
+
+  deep_sdf_model_file = "/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/modeling/models/autodecoder_tank_2d_motion_auto_decoder_2024-11-18-14-09-09.pt"
+  mlp = DeepSDFDecoder(layer_dims=[512] * 6, input_dim=35, output_dim=1)
+  model = AutoDecoder(100, 32, mlp)
+  model.load(deep_sdf_model_file)
+
+  latent_vectors = model.codes.weight
+
+  # to train our model we will construct an X and Y
+  # 
+  # X = (q, p, num_steps) , where q is the position, p is the velocity, and num_steps is the number of rollout steps into the future
+  # Z = (Q_h, P_h) , where q_h is the position, and p_h is the velocity at timestep t + num_steps
+
+  # for now we will just use a fixed number of steps for all samples
+  # the q is unknown to start, so we can set it to 0 or random values
+  # then to create Y we can create views of X, where is the current index up to i + num_steps
+  # if i + 10 < len(X), then we can set the num of steps to len(X) - i for those samples
+  num_steps = 4
+  # X.shape = (latent_dim * 2 + 1) . x = (q, p, num_steps)
+  # copy the latent vectors to the first half of X
+
+  # Z = (Q_h, P_h) , where q_h is the position, and p_h is the velocity at timestep t + num_steps
+  # Y.shape = [N, num_steps, latent_vectors.shape[1] * 2]
+  # we want to create a view of X for each sample, where we take the current index up to i + num_steps
+  # we want to create an encoded dataset
+  shared_embeddings = nn.Embedding(latent_vectors.shape[0], latent_vectors.shape[1] * 2)
+  # append latent_vector of 0s to the second half, these are the p values
+  shared_latent_vectors = torch.cat((latent_vectors, torch.zeros_like(latent_vectors)), dim=1)
+  shared_embeddings.weight = nn.Parameter(shared_latent_vectors)
+
+  # detach the shared embeddings so they cannot be updated
+  shared_embeddings.weight.requires_grad = False
+
+  # print the share embeddings shape
+  print(f'shared_embeddings: {shared_embeddings.weight.shape}') # 100 64
+
+  # create view of the embedding weights for X 
+
+  
+
+  dhnode_mlp = MLP(input_dim=latent_vectors.shape[1], output_dim=1, layer_dims=[512] * 4)
+  dhnode = DHNODE(dhnode_mlp)
+  integrator = RK2(dhnode)
+  # integrator = RK4(dhnode)
+  dhnode_integrator = DHNODEIntegrator(dhnode, integrator, shared_embeddings)
+
+
+  def dhnode_loss(Z_p, Z):
+    # for now just use Q_p - Q , instead of Q_p - Q, P_p - P
+
+    steady_state = shared_embeddings(torch.tensor([0]))
+    steady_state = steady_state[:, :steady_state.shape[-1] // 2]
+
+    dims = Z.shape[-1] // 2
+    # print(f'Z_p_shape: {Z_p.shape}')
+    # print(f'Z_shape: {Z.shape}')
+    # squeeze axis 2 for z_p
+    Z_p = Z_p.squeeze(2) 
+    Z_p = Z_p[:, :, :dims]
+    Z = Z[:, :, :dims]
+
+    # add extra weight to the very last two points in the sequence
+
+
+    return torch.mean((Z_p - Z)**2) #+ 0.5 * torch.mean((Z_p[-1] - steady_state)**2)
+
+
+  loss_fn = dhnode_loss
+  optimizer = optim.Adam(dhnode_integrator.parameters(), lr=0.0001)
+  batch_size = 10
+  loss_plotter = LossPlotter()
+  plotter = loss_plotter
+
+
+  # for i in tqdm(range(1, num_steps + 1, 1)):
+  epochs = 150 #+ int(i / float(num_steps) * 50) 
+  cur_num_steps = num_steps
+  dhnode_dataset = EncodedDHNODEDataset(cur_num_steps, dhnode_integrator, shared_latent_vectors.shape[1])
+  loss_history, train_data, val_data = train(dhnode_integrator,
+                                              dhnode_dataset,
+                                              epochs,
+                                              optimizer,
+                                              batch_size,
+                                              loss_fn,
+                                              plotter=plotter,
+                                              output_model_folder="models",
+                                              output_model_name="dhnode_tank_2d_motion"
+                                              )
+    
+  
+
+  
+  # evaluate the model on the dataset with a fixed number of steps
+  # evaluate the model for the length of the whole dataset
+
+
+  eval_data_set = EncodedDHNODEDataset(len(dhnode_dataset), dhnode_integrator, shared_latent_vectors.shape[1], training=False)
+  eval_data_loader = DataLoader(eval_data_set, batch_size=1, shuffle=False)
+  eval_data = next(iter(eval_data_loader))
+  X, Z = eval_data
+  Z_p = dhnode_integrator(X)
+
+  print(f'z_p: {Z_p.shape}')
+  # collapse the axis 2, because its just 1, right now shape [1, N, 1, latent_dim] -> [1, N, latent_dim]
+  Z_p = Z_p.squeeze(2)
+  Z_p = Z_p.squeeze(0)
+  Q_p = Z_p[:, :Z_p.shape[-1] // 2]
+
+  # now use test_auto_decoder to evaluate the model
+  # but make sure to use only the Q_h, not the P_h
+  test_auto_decoder(embeddings=Q_p)
+
+
+def get_lr_lambda(lr_schedule, epochs):
+  def lr_lambda(epoch):
+    for i, (p, lr) in enumerate(lr_schedule):
+      if epoch < epochs * p:
+        return lr
+    return lr_schedule[-1][1]
+  return lr_lambda
+
+def joint_train(
+    params,
+    ctx
+):
+  # Split data into training and validation sets #
+  # ! NOTE: How do we split the data for the ode model? removing random frames ruins sequences
+  # and removing frames at the end or begining is not a balanced split, (if we have multiple sequences, we can split over sequences)
+
+  # NOTE: Q: SDF Samples Only drawn from rollout sequence?
+  # NOTE: Q: When we get the joint loss, should we evaluate the sdf model on the odes predictions, if so, do we do all samples in the batches or just a subset?
+
+  # We want to be able to stop the training at any time, and save the results, in case we finish early , or its taking too long
+  # or theres a some other error
+
+
+  # loop for number of epochs
+  #  loop for number of rollouts
+  #    pick a frame from 0 to num_frames - rollout_length
+  #    loop for number of batches in rollouts
+  #       evaluate the sdf model
+  #       backprop loss for the sdf model
+  #    perform a rollout with the ode model
+  #    get the joint loss , which is the diff of the latent vec, as well as the 
+  #   backprop the joint loss
+  #   NOTE: the grad flow is as follows
+  #   - we get the loss for the ode model between its prediction, and the actual current vector
+  #   - then evaluate the sdf model on the odes predicted latent vector, on some number of samples and get the loss
+  #   - then combine the loss with the ode loss, and backprop the joint loss, to params, and to the latent vector
+  #   
+  #   then we store the loss in the loss history
+  #   then we plot the loss history
+
+  #NOTE: for now we will ignore val split, because val split is hard to do on ode
+
+  loss_history = {
+    "ode_loss": [],
+    "sdf_loss": [],
+    "joint_loss": []
+  }
+  epochs = params["train_params"]["epochs"]
+  batch_size = params["train_params"]["batch_size"]
+  tot_num_samples = ctx["num_frames"] * ctx["num_samples"]
+  num_batches = tot_num_samples // batch_size
+
+  # ode
+  ode_model = ctx["ode_model"]
+  ode_lr_schedule = params["ode"]["lr_schedule"]
+  ode_lr_schdule_fn = get_lr_lambda(ode_lr_schedule, epochs)
+  lr_init = ode_lr_schdule_fn(0)
+  ode_optimizer = params["train_params"]["optimizer"](ode_model.parameters(), lr=lr_init)
+  ode_scheduler = optim.lr_scheduler.LambdaLR(ode_optimizer, lr_lambda=ode_lr_schdule_fn)
+  ode_loss_fn = params["ode"]["loss_fn"]
+  rollout_schedule = params["ode"]["rollout_schedule"]
+
+  # sdf
+  sdf_model = ctx["deep_sdf_model"]
+  sdf_lr_schedule = params["deep_sdf"]["lr_scedule"]
+  sdf_lr_schdule_fn = get_lr_lambda(sdf_lr_schedule, epochs)
+  lr_init = sdf_lr_schdule_fn(0)
+  sdf_optimizer = params["train_params"]["optimizer"](sdf_model.parameters(), lr=lr_init)
+  sdf_scheduler = optim.lr_scheduler.LambdaLR(sdf_optimizer, lr_lambda=sdf_lr_schdule_fn)
+  sdf_loss_fn = params["deep_sdf"]["loss_fn"]
+
+
+
+  n_f = ctx["num_frames"]
+  n_s = ctx["num_samples"]
+
+  plotter = params["train_params"]["plotter"]
+
+  def get_k(epoch_p):
+    for i, (p, k) in enumerate(rollout_schedule):
+      if epoch_p < p:
+        return k
+    return rollout_schedule[-1][1]
+  
+  def get_batch(n, X_s, Y_s, code_ids, z, kn):
+    # we want to get the batch from the range_start to range_end of the frames
+    # then we want to get the flatten batch with the frame ids attached
+    # then we want to get the latent vectors for the batch, and left attach them ( just the q vectors)
+    # shape [frames, samples, 3] -> [batch_size, 4] -> [batch_size, embedding_len + 3]
+
+    # get the size of the tot samples from seq
+    tot_samples = X_s.shape[0]
+    b_ids = torch.randint(0, tot_samples, (n,))
+    # print(f'tot_samples: {tot_samples}')
+
+    # print(f'code_ids: {code_ids.shape}')
+    # print(f'b_ids: {b_ids.shape}')
+
+
+
+    b_code_ids = code_ids[b_ids]
+
+    # get the latent vectors and attach to X on the left
+    z_b = z(b_code_ids)
+    X_b = X_s[b_ids]
+    Y_b = Y_s[b_ids]
+
+    X_b = torch.cat((X_b, z_b), dim=1)
+    return X_b, Y_b, b_code_ids
+
+  D = ctx["samples"]
+  num_batches_per_rollout = params["train_params"]["batches_per_rollout"]
+  num_rollouts_per_epoch = num_batches // num_batches_per_rollout
+
+  
+
+  with tqdm(total=epochs * num_batches) as pbar:
+    iteration = 0
+    for epoch in range(epochs):
+      try:
+        epoch_p = epoch / float(epochs)
+        k_n = get_k(epoch_p) # rollout length
+        # start frame of rollout randomly pick start frame of rollout between 0 and n_f - k_n
+        # print(f'k_n: {k_n}')
+        # print(f'n_f: {n_f}')
+        z = ctx["z"]
+        z.requires_grad = True
+        cur_batch = 0
+        cur_rollout = 0
+        k = torch.randint(0, n_f - k_n, (1,)).item()
+        # print(f'k: {k}')
+        D_seq = D[k:k + k_n]
+        D_s_flat, code_ids = flatten_models_samples(D_seq)
+        X_s, Y_s = D_s_flat[:, :3], D_s_flat[:, 3].reshape(-1, 1)
+        for j in range(num_rollouts_per_epoch):
+          b_loss_history = {
+            "sdf_loss": [],
+          }
+
+          sdf_rollout_pred = []
+          for i in range(num_batches_per_rollout):
+            # we get the batch, selected from the frames in the rollout
+            X_b, Y_b, b_code_ids = get_batch(batch_size, X_s, Y_s, code_ids, z, k_n)
+            # sdf model
+            sdf_optimizer.zero_grad()
+            # print(f'X_b: {X_b.shape}')
+            # print(f'batch_size: {batch_size}')
+            Y_pred = sdf_model(X_b)
+            sdf_rollout_pred.append(Y_pred)
+            sdf_loss = sdf_loss_fn(Y_pred, Y_b)
+            sdf_loss.backward()
+            sdf_optimizer.step()
+            sdf_scheduler.step()
+            pbar.update(1)
+            iteration += 1
+            cur_batch += 1
+
+            b_loss_history["sdf_loss"].append((epoch, cur_batch, sdf_loss.item()))
+            # use scientific notation for lr
+            pbar.set_description(f"Epoch: {epoch}, SDF Loss: {sdf_loss.item():.2f} batch: {i}/{num_batches} cur_lr: {sdf_optimizer.param_groups[0]['lr']:.2e}")
+
+
+          #===============================sdf batches done=================================================================
+          # update the ode model, with latent vectors
+          # ode_batch_size 1 for now
+
+          total_batch_loss = np.sum([l[2] for l in b_loss_history["sdf_loss"]])
+          avg_batch_sdf_loss = np.mean([l[2] for l in b_loss_history["sdf_loss"]])
+          
+          ode_optimizer.zero_grad()
+          # shape [ode_batch_size, latent_dim]
+          Z_k = z(torch.tensor([k])).expand(batch_size, -1)
+          # attach number of steps for rollout in col 0
+          num_steps = torch.tensor([k_n]).expand(batch_size, 1)
+          ode_X_b = torch.cat((Z_k, num_steps), dim=1) # shape [ode_batch_size, latent_dim + 1]
+          # shape [ode_batch_size, k_n, latent_dim]
+          ode_Y_b = z(torch.tensor([k + k_n])).expand(batch_size, k_n, -1)
+          Z_p = ode_model(ode_X_b) # shape [ode_batch_size, k_n, latent_dim]
+
+          # print(f'Z_p: {Z_p.shape}')
+          # print(f'ode_Y_b: {ode_Y_b.shape}')
+          ode_loss = ode_loss_fn(Z_p, ode_Y_b)
+
+          ode_loss.backward()
+          ode_optimizer.step()
+          ode_scheduler.step()
+          cur_rollout += 1
+
+          # append loss to history
+          loss_history["ode_loss"].append((epoch * cur_rollout, ode_loss.item()))
+          loss_history["sdf_loss"].append((epoch * cur_rollout, avg_batch_sdf_loss))
+          loss_history["joint_loss"].append((epoch * cur_rollout, avg_batch_sdf_loss + ode_loss.item()))
+
+          # plot
+          # 
+          plotter.update(loss_history, epoch * cur_rollout)
+      except Exception as e:
+        #handle the case where there is a keyboard interrupt or some other error and save the model
+        print(f"Error: {e}")
+    
+    plotter.finish()
+
+
+    model = SDFDHNODEjoint(ode_model, sdf_model, ctx["z"])
+    # model.save("sdfdhnode_joint")
+    return loss_history, model  
+
+def ode_loss(Z_p, Z):
+  # shape = [N, num_steps, latent_dim * 2], N is the batch size
+
+  return torch.mean((Z_p - Z)**2)
+
+def joint_train_deep_sdf_odenet():
+  # we want to be able to jointly train the deep sdf model, and the ode model
+  # without the joint training, the sdf model learns a latent space that is not smooth and does not
+  # have the features of a hamiltonian space
+  # To train both models jointly we need to allow them to share the same latent space, and to back propogate the 
+  # error from the networks, so that they both modify the latent space, and not just the sdf model
+  # we also need to introduce joint loss, so that the models effect eachother during training
+
+  # because the sdf model is trained of batches of single point samples, and the ode model is trained on sequences of the
+  # latent codes, they cannot be trained at each step together
+  # instead we will have to train the sdf every step, and we do a ode rollout every ~10 steps/batches
+
+  # we we also want a schedule to increase rollout length over time 
+  # and we want random sampling of where to start the rollout from
+
+  # the sdf should be trained on the samples
+  # which have the form (id, x, y, z, sdf) -> (q_1, ...q_n, p_1, ...p_n, x, y, z, sdf)
+
+  # we will also want to model the loss of both models, and the joint loss of the models
+
+  # NOTE: things that still need including
+  # - fourier features
+  # - gaussian latent vectors during training
+
+  params = {
+    # sdf are samples are in a .pt file
+    # the shape of the tensor is (num_frames, num_samples, 4), 4 -> (x, y, z, sdf)
+    "sdf_data_path": "/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/simulation/blender/scripts/data/tank_2d_motion_2024-11-02_23-28-02/tank_2d_motion_2024-11-02_23-28-02_simplified_samples_1000.pt",
+    # this is the size of the latent space
+    # but note that the ode model will have a latent space of size 2 * latent_dim, for the velocity vectors
+    "embedding_len": 8,  
+    # these are the MLP dimensions for the models
+    # ===================================DEEP_SDF===========================
+    "deep_sdf": {
+      "layers": [256,256,256,128,128,128],
+      "lr_scedule": [
+        # (<percent of epoch, lr) , means the lr for epochs less than percent of epochs * lr
+        (1.0, 0.01),
+      ],
+      "loss_fn": clamped_l1_loss
+    } ,
+    #===================================ODE===========================
+    "ode": {
+      "layers": [128, 128],
+      "lr_schedule": [
+        (1.0, 0.1)
+      ],
+      "rollout_schedule": [
+        # (<percent of epoch, rollout length)
+        (0.25, 10),
+        (0.5, 20),
+        (0.75, 35),
+        (1.0, 32)
+      ],
+      "gamma": 0.1,
+      "m": 1.0,
+      "integrator": RK4,
+      "loss_fn": ode_loss
+    },
+    #==============================================================
+    "train_params": {
+      "epochs": 10,
+      "batch_size": 64,
+      "val_split": 0.2,
+      "batches_per_rollout": 50,
+      "plotter": LossPlotter(),
+      "optimizer": optim.Adam,
+    },
+  }
+
+  # training context for keeping track of data
+  ctx = {} # shhh, I dont care if this is bad practice
+
+
+  # Load Data
+  # - load sdf samples, and flatten and attach the frame id to the samples (num_frames, num_samples, 4) -> (num_frames * num_samples, 5)
+
+  sdf_sample_pt = torch.load(params["sdf_data_path"])
+  sdf_sample_pt = sdf_sample_pt[0:150, :, :]
+  ctx["num_frames"] = sdf_sample_pt.shape[0]
+  ctx["num_samples"] = sdf_sample_pt.shape[1]
+  ctx["samples"] = sdf_sample_pt
+  # ctx["samples_flat"], ctx["code_ids"] = flatten_models_samples(sdf_sample_pt)
+
+
+  # initialize latent vectors
+  ctx["z"] = nn.Embedding(ctx["num_frames"], params["embedding_len"] * 2)
+  # initialize with random values
+  nn.init.normal_(ctx["z"].weight, mean=0, std=0.1)
+  # set idx for p and q
+  ctx["q_idx"] = (0, params["embedding_len"])
+  ctx["p_idx"] = (params["embedding_len"], params["embedding_len"] * 2)
+
+
+  # Init Models
+  
+  # initialize deep_sdf model
+  # input = (q, x, y, z)
+  deep_sdf_mlp = DeepSDFDecoder(
+    params["deep_sdf"]["layers"], 
+    input_dim=(params["embedding_len"] * 2 + 3),
+    output_dim=1)
+  q_view = ctx["z"].weight[:, ctx["q_idx"][0]:ctx["q_idx"][1]]
+  # this might be wrong way to do view of embeddings
+  deep_sdf_model = AutoDecoder(ctx["num_frames"], params["embedding_len"], deep_sdf_mlp, embedding_w=q_view) 
+  ctx["deep_sdf_model"] = deep_sdf_model
+
+
+  # initialize ode model
+  # - initialize the integrator
+  # - initialize the ode model
+  
+  ode_mlp = MLP(
+    input_dim=params["embedding_len"] * 2,
+    output_dim=1, 
+    layer_dims=params["ode"]["layers"]
+    )
+  integrator = params["ode"]["integrator"](ode_mlp)
+  dhnode = DHNODE(ode_mlp,
+                  gamma=params["ode"]["gamma"],
+                  m=params["ode"]["m"]
+                  )
+  ode_model = DHNODEIntegrator(dhnode, integrator, ctx["z"])
+  ctx["ode_model"] = ode_model
+
+  def joint_loss(ode_loss, sdf_loss, lambda_ode=1):
+    return lambda_ode * ode_loss + sdf_loss
+  
+  params["train_params"]["loss_fn"] = joint_loss
+    
+  # initialize datasets for training
+
+  
+  # train the models
+  loss_history, model = joint_train(params, ctx)
+  
+  # evaluate the models
+
+  # save the models
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def test_auto_decoder(embeddings=None):
+    model_file = '/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/modeling/models/autodecoder_tank_2d_motion_auto_decoder_2024-11-18-14-09-09.pt'
+    model_file_loaded = torch.load(model_file)
+    for key in model_file_loaded.keys():
+      print(f'{key}: {model_file_loaded[key].shape}')
+
+    mlp = DeepSDFDecoder(layer_dims=[512] * 6, input_dim=35, output_dim=1)
+    model = AutoDecoder(100, 32, mlp)
+    model.load(model_file)
+    
+    if embeddings is None:
+      embeddings = model.codes.weight
+    print(embeddings.shape)
+
+    f = embeddings.shape[0]
+    e = embeddings.shape[1]
+
+    embeddings = embeddings.detach()
+
+    # variance = torch.var(embeddings, dim=0)
+    # mean = torch.mean(embeddings, dim=0)
+    # # sort the variance
+    # variance, _ = torch.sort(variance, descending=True)
+
+    # # only keep the top k dimensions with the most variance, rest go to 0
+    # k = 30
+    # variance = variance[:k]
+    # # get the indices of the top k dimensions
+    # indices = embeddings.var(dim=0).topk(k).indices
+    # # set the embeddings to mean for the indices that are not in the top k
+    # # get the indices that are not the top k
+    # not_top_k = [i for i in range(e) if i not in indices]
+    # for i in not_top_k:
+    #   embeddings[:, i] = mean[i]
+
+    # uniformly sample the unit cube for each frame
+    # X = F x [N^3] x [3], Y = F x [N^3] x [1]
+    n = 100
+    # x = [x, code]
+    X = torch.zeros((f, n**2, 3 + e))
+    # fill the positions with random values between 0 and 1, except for y axis, set to 0.5
+    X[:, :, :3] = torch.rand((f, n**2, 3))
+    X[:, :, 1] = 0.5
+    # fill the codes with the embeddings
+    print(f'X_shape: {X.shape}')
+    print(f'embeddings_shape: {embeddings.shape}')
+    for i in range(f):
+      X[i, :, 3:] = embeddings[i].repeat(n**2, 1)
+
+    
+    # evaluate the model
+    model.eval()
+    Y = torch.zeros((f, n**2, 1))
+    for i in tqdm(range(f)):
+      Y[i] = model(X[i])
+    
+    # remove the code from the input ,and attach the input to the output
+    eval_pt_tensor = torch.cat((X[:, :, :3], Y), dim=2)
+
+    # we need to attach the frame number to the index
+
+    output_eval = 'test_eval.pt'
+    # detach grad
+    eval_pt_tensor = eval_pt_tensor.detach()
+    torch.save(eval_pt_tensor, output_eval)
+
+    np_embed = embeddings.detach()
+    plot_embeddings(np_embed)
+
+
+
+
+
+
+
+
 
 def main():
   # train_deep_sdf()
-  train_deep_sdf_auto_decoder()
+  # train_deep_sdf_auto_decoder()
+  # test_auto_decoder()
+  # train_odenet()
+  joint_train_deep_sdf_odenet()
+
+  
+  
 
 
 

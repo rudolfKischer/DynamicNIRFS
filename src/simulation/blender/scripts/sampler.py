@@ -5,6 +5,7 @@ from tqdm import tqdm
 import torch
 import pathlib
 import sys
+import trimesh
 
 
 # pickle file contains list of meshes
@@ -13,6 +14,8 @@ import sys
 # both are numpy arrays
 
 COLLAPSE_Y_AXIS = True
+SWAP_YZ = True
+
 
 def load_mesh_sequence(pickle_file_path):
   with open(pickle_file_path, "rb") as f:
@@ -133,14 +136,79 @@ def sample_and_save(pickle_file_path, num_samples):
   save_pt_tensor(pt_data, pt_output_file)
   return pt_data, pt_output_file
 
+# Sample arbitrary unprepped single mesh from obj file
+def fit_to_unit_cube(mesh):
+  # get the bounding box, by get the max and min of each axis
+  # get the center of the bounding box
+  # translate the mesh to the origin
+  # scale the mesh to demensions of 1, (uniformly scale)
+  # translate to 0.5, 0.5, 0.5
+  # vertices shape: (n, 3)
+  bb_min = np.min(mesh['vertices'], axis=0)
+  bb_max = np.max(mesh['vertices'], axis=0)
+  center = (bb_max + bb_min) / 2
+  mesh['vertices'] -= center
+  dims = bb_max - bb_min
+  scale = 1 / np.max(dims)
+  mesh['vertices'] *= scale
+  mesh['vertices'] += 0.5
+  return mesh
+
+def load_mesh_from_obj(obj_file):
+  mesh = trimesh.load(obj_file)
+  vertices = mesh.vertices
+  faces = mesh.faces
+  return {
+    'vertices': vertices,
+    'faces': faces
+  }
+
+def save_mesh_sequence(mesh_sequence, output_file):
+  with open(output_file, "wb") as f:
+    pickle.dump(mesh_sequence, f)
+
+def sample_single_mesh(obj_file, num_samples):
+  mesh = load_mesh_from_obj(obj_file)
+  mesh = fit_to_unit_cube(mesh)
+  # mesh to mesh sequence as to pickle file
+  mesh_sequence = [mesh]
+  if SWAP_YZ:
+    mesh_sequence = swap_yz(mesh_sequence)
+  output_file = pathlib.Path(obj_file).parent / (pathlib.Path(obj_file).stem + ".pkl")
+  save_mesh_sequence(mesh_sequence, output_file)
+
+
+  samples, sdf = random_sample_unit_cube_even_split(num_samples, mesh)
+  return samples, sdf
+
+def sample_and_save_single_mesh(obj_file, num_samples):
+  samples, sdf = sample_single_mesh(obj_file, num_samples)
+  obj_path = pathlib.Path(obj_file)
+  pt_output_file = obj_path.parent / (obj_path.stem + f"_samples_{num_samples}.pt")
+  # reshape to be a single frame
+  samples = samples.reshape((1, num_samples, 3))
+  sdf = sdf.reshape((1, num_samples))
+  pt_data = to_pt_tensor(samples, sdf)
+  save_pt_tensor(pt_data, pt_output_file)
+  return pt_data, pt_output_file
+
+
 def main():
   
-  # load the pickle file
+  # # load the pickle file
   pickle_path = sys.argv[1]
   # pickle_path = "/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/simulation/blender/scripts/data/tank_2d_motion_2024-11-02_21-11-47/tank_2d_motion_2024-11-02_21-11-47_simplified.pkl"
-  # pickle_path = "/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/simulation/blender/scripts/meshes/tank_2d_motion_2024-11-02_13-48-16/tank_2d_motion_2024-11-02_13-48-16.pkl"
+  # # pickle_path = "/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/simulation/blender/scripts/meshes/tank_2d_motion_2024-11-02_13-48-16/tank_2d_motion_2024-11-02_13-48-16.pkl"
   n = int(sys.argv[2])
+  # pickle_path = "/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/simulation/blender/scripts/data/tank_2d_motion_2024-11-02_23-28-02/tank_2d_motion_2024-11-02_23-28-02_simplified.pkl"
+  # n = 1000
   sample_and_save(pickle_path, n)
+
+  # single mesh test
+  # obj_file = '/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/simulation/blender/scripts/stanford-bunny.obj'
+  # n = 10000
+  # sample_and_save_single_mesh(obj_file, n)
+
 
 if __name__ == "__main__":
   main()

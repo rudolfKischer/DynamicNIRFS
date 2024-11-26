@@ -67,6 +67,29 @@ def get_mesh_sequence(use_first_frame_bounding_box=True):
     fluid_domain = bpy.data.objects[fluid_domain_name]
     fluid_object = bpy.data.objects[fluid_object_name]
 
+
+    # Get the instaneous velocities of the container at each frame before performing any transformations
+    fps = bpy.context.scene.render.fps
+    delta_t = 1 / fps
+    container_positions = []
+    velocities = []
+    for i in tqdm(range(1, last_frame + 1), desc="Extracting Container Velocities"):
+        bpy.context.scene.frame_set(i)
+        container_positions.append(np.array(container.location))
+        if i == 1:
+            velocities.append(np.zeros(3))
+        else:
+            distance = container_positions[-1] - container_positions[-2]
+            velocities.append(distance / delta_t)
+    
+    # calculate instantaneous acceleration / impulse
+    impulses = []
+    for i in tqdm(range(1, len(velocities)), desc="Extracting Container Impulses"):
+        impulses.append((velocities[i] - velocities[i-1]))
+    # add the last acceleration as the last value
+    impulses.append(impulses[-1])
+       
+
     # Step 1: Compute Scaling Factor from the First Frame's Bounding Box
     bpy.context.scene.frame_set(1)  # Set to first frame
     bm_initial = bmesh.new()
@@ -121,6 +144,7 @@ def get_mesh_sequence(use_first_frame_bounding_box=True):
 
     fluid_object_translation = np.array(fluid_object.location)
     fluid_surface_translation = np.array(fluid_surface.location)
+
 
     # Step 3: Iterate Through All Frames and Transform Meshes
     for i in tqdm(range(1, last_frame + 1), desc="Extracting Meshes from Frames"):
@@ -185,10 +209,13 @@ def get_mesh_sequence(use_first_frame_bounding_box=True):
         # Store the transformed mesh
         mesh = {
             'vertices': transformed_vertices_np,  # Transformed vertices with Y and Z swapped
-            'faces': faces_np                     # Face indices
+            'faces': faces_np,                    # Face indices
+            'velocity': velocities[i-1],
+            'impulse': impulses[i-1]
         }
         mesh_sequence.append(mesh)
-
+    # print velocities
+    # print(f"Velocities: {velocities}")
     return mesh_sequence
 
 
