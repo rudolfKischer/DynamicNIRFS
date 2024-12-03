@@ -11,6 +11,8 @@ import time
 import zipfile
 from tqdm import tqdm
 import shutil
+import json
+import random
 
 
 # run with blender command 
@@ -18,12 +20,21 @@ import shutil
 tank_2d_motion = 'tank_2d_motion.py'
 blend_to_mesh = 'blend_to_mesh.py'
 
-REDUCE_MESH = True
+
 ZIP_RESULTS = True
 
-def gen_trial(trial_name, phases):
+def write_to_json(data, file_path):
+  with open(file_path, "w") as f:
+    json.dump(data, f)
 
-  data_folder = pathlib.Path("data")
+def load_json(json_file):
+  with open(json_file, "r") as f:
+    data = json.load(f)
+  return data
+
+def gen_trial(trial_name, phases, data_folder, config):
+
+  
   # create if it does not exist
   data_folder.mkdir(exist_ok=True)
 
@@ -33,6 +44,16 @@ def gen_trial(trial_name, phases):
   # get the cwd 
   cwd = pathlib.Path.cwd()
   output_folder = cwd / data_folder / trial_name
+  
+  # create the trial folder if it does not exist
+  output_folder.mkdir(exist_ok=True)
+
+  trial_folder = output_folder
+
+  # write the config to a json file called trial_config.json
+  config_file = trial_folder / "trial_config.json"
+  write_to_json(config, config_file)
+
   
 
   # # Create and bake blender Scene, run from command line
@@ -45,6 +66,8 @@ def gen_trial(trial_name, phases):
   # save_command = f'blender --background --python {blend_to_mesh} -- "{output_folder}"'
   # subprocess.run(save_command, shell=True)
 
+  REDUCE_MESH = config['mesh_simplification']
+
   # First command to bake the Blender scene
   if 0 in phases:
     bake_command = [
@@ -52,7 +75,8 @@ def gen_trial(trial_name, phases):
         "--background",
         "--python", tank_2d_motion,
         "--",
-        "--output_folder", output_folder
+        "--output_folder", trial_folder,
+        "--config_file", config_file
     ]
     subprocess.run(bake_command, shell=False)
 
@@ -63,23 +87,18 @@ def gen_trial(trial_name, phases):
         "--background",
         "--python", blend_to_mesh,
         "--",
-        output_folder  # Pass the output folder as a positional argument
+        "--input_folder", trial_folder,
     ]
     subprocess.run(save_command, shell=False)
-  
-  pickle_file_path = output_folder / f"{trial_name}.pkl"
 
   if REDUCE_MESH and 2 in phases:
     # Reduce the number of vertices in the mesh sequence
-    simplify_meshes.unpack_and_simplify(output_folder)
-    # remove the original pickle file that is not called _simplified.pkl
-    for f in output_folder.iterdir():
-      if f.suffix == ".pkl" and not "_simplified" in f.stem:
-        f.unlink()
-    print(f"Removed the original pickle file: {output_folder}")
-  if REDUCE_MESH:
-    pickle_file_path = output_folder / f"{trial_name}_simplified.pkl"
-    # Gather uniform random sdf samples from the mesh sequence
+    simplify_command = [
+        "python",
+        "simplify_meshes.py",
+        str(trial_folder)
+    ]
+    subprocess.run(simplify_command, shell=False)
   
 
   # NOTE: TEMPORARY HACK
@@ -94,8 +113,7 @@ def gen_trial(trial_name, phases):
     sample_command = [
         "python",
         "sampler.py",
-        str(pickle_file_path),
-        "1000"
+        str(trial_folder)
     ]
 
     subprocess.run(sample_command, shell=False)
@@ -117,27 +135,143 @@ def gen_trial(trial_name, phases):
       # recursive force remove the output folder
       shutil.rmtree(output_folder)
 
+def gen_impulses(config_template_path):
+
+  # we want to generate a set of random impulses that will be used to perturb the fluid
+  # the container, fluid, and fluid domain all have certain dimensions
+  # the container can move throughout the trial based on the impulses
+  # but we need to make sure the container never gets moved outside the fluid domain
+  # this means we need to generate a that will keep the container within the fluid domain
+  config_template = load_json(config_template_path)
+  # for now we will start with a single initial impulse in the x direction
+  fps = config_template['fps']
+  num_frames = config_template['num_frames']
+  domain_dimensions = config_template['domain_dimensions']
+  fluid_dimensions = config_template['fluid_dimensions']
+  # container dimensions = fluid_dimensions but height is domain height
+  container_dimensions = fluid_dimensions.copy()
+  container_dimensions[2] = domain_dimensions[2]
+
+  total_time = num_frames / fps
+  # the container is centered at the origin
+  # and the domain is centered at the origin
+  # the max distance we can travel, in one direction
+  # (domain_dimensions / 2) - (container_dimensions / 2)
+  abs_x_max_container_pos = (domain_dimensions[0] / 2) - (container_dimensions[0] / 2)
+
+  max_x_init_velocity = abs_x_max_container_pos / total_time
+
+  # we will generate a random impulse in the x direction between -max_init_velocity and max_init_velocity
+
+  mean_impulse_magnitude = config_template['mean_impulse_magnitude']
+  std_dev_impulse_magnitude = config_template['std_dev_impulse_magnitude']
+  impulse = random.gauss(mean_impulse_magnitude, std_dev_impulse_magnitude)
+  impulse = min(impulse, max_x_init_velocity)
+  impulse = max(impulse, -max_x_init_velocity)
+
+  init_impulse = [impulse, 0, 0]
+
+  frame_impulses = [
+    [0, init_impulse],
+    [int(num_frames // 2), [-impulse, 0, 0]] # stopping impulse
+  ]
+
+  return frame_impulses
 
 
+
+
+
+
+
+def gen_trials(config_template, 
+               trials_folder,
+               phases):
+
+  # load the config template
+  config = load_json(config_template)
+  num_trials = config['num_trials']
+  data_folder = pathlib.Path(trials_folder)
+  # create log file
+  log_file = data_folder / "log.txt"
+  # create the log file if it does not exist
+  if not log_file.exists():
+    log_file.touch()
+  with open(log_file, "w") as f:
+    f.write(f"Generating {num_trials} Trials\n")
+    f.write(f"Phases: {phases}\n")
+    f.write(f"Config: {config}\n")
+    f.write(f"Config Template: {config_template}\n")
+    f.write(f"Trials Folder: {trials_folder}\n")
+
+
+
+  for i in tqdm(range(num_trials), desc="Generating Trials"):
+    trial_impulses = gen_impulses(config_template)
+    config['frame_impulses'] = trial_impulses
+    trial_name = f"trial_{i}"
+    # redirect stdout to log file for the whole trial generation
+
+    gen_trial(trial_name, phases, data_folder, config)
+    # redirect stdout back to console
+  
+  # save the config template to the trials folder
+  config_file = data_folder / "trials_config.json"
+  write_to_json(config, config_file)
+  
+
+
+
+# def main():
+#   start_time = time.time()
+#   phases = [
+#     0, 
+#     1, 
+#     2,
+#     3,
+#     # 4,
+#   ]
+#   # trial_name = f"tank_2d_motion_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+#   trial_name = 'tank_2d_motion_2024-11-11_11-23-36'
+#   data_folder = pathlib.Path("trials")
+#   trial_config_template_path = pathlib.Path("/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/simulation/blender/scripts/trials/trial_config_1.json")
+#   trial_config = load_json(trial_config_template_path)
+#   gen_trial(trial_name, phases, data_folder, trial_config)
+#   elapsed_time = time.time() - start_time
+#   # convert to hours, minutes, seconds
+#   h = elapsed_time // 3600
+#   m = (elapsed_time % 3600) // 60
+#   s = elapsed_time % 60
+#   print(f"Elapsed Time: {h:.0f}h {m:.0f}m {s:.2f}s")
 
 def main():
+
   start_time = time.time()
   phases = [
-    # 0, 
+    0, 
     1, 
     2,
-    # 3,
+    3,
     # 4,
   ]
-  # trial_name = f"tank_2d_motion_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
-  trial_name = 'tank_2d_motion_2024-11-11_11-23-36'
-  gen_trial(trial_name, phases)
+  
+  trials_folder = pathlib.Path("trials")
+  cur_trials_folder = f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+  trials_folder = trials_folder / cur_trials_folder
+  # create the trials folder
+  trials_folder.mkdir(exist_ok=True)
+
+  trial_config_template_path = "trials/trial_config_1.json"
+  gen_trials(trial_config_template_path, trials_folder, phases)
+
   elapsed_time = time.time() - start_time
   # convert to hours, minutes, seconds
   h = elapsed_time // 3600
   m = (elapsed_time % 3600) // 60
   s = elapsed_time % 60
   print(f"Elapsed Time: {h:.0f}h {m:.0f}m {s:.2f}s")
+
+
 
 if __name__ == "__main__":
   main()

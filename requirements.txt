@@ -10,4 +10,5 @@ libigl
 pyvista
 seaborn
 pillow
+torchode
 

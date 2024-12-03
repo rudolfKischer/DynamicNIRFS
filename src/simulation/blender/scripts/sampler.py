@@ -6,6 +6,7 @@ import torch
 import pathlib
 import sys
 import trimesh
+import json
 
 
 # pickle file contains list of meshes
@@ -169,7 +170,7 @@ def save_mesh_sequence(mesh_sequence, output_file):
 
 def sample_single_mesh(obj_file, num_samples):
   mesh = load_mesh_from_obj(obj_file)
-  mesh = fit_to_unit_cube(mesh)
+  # mesh = fit_to_unit_cube(mesh)
   # mesh to mesh sequence as to pickle file
   mesh_sequence = [mesh]
   if SWAP_YZ:
@@ -192,22 +193,72 @@ def sample_and_save_single_mesh(obj_file, num_samples):
   save_pt_tensor(pt_data, pt_output_file)
   return pt_data, pt_output_file
 
+def load_json(json_file):
+  with open(json_file, "r") as f:
+    data = json.load(f)
+  return data
+
+def sample_trial(trial_folder):
+  global COLLAPSE_Y_AXIS
+  global SWAP_YZ
+  config_file = trial_folder / "trial_config.json"
+  config = load_json(config_file)
+  num_frames = config['num_frames']
+  num_samples = config['samples_per_frame']
+  collapse_y_axis = config['collapse_sample_y_axis']
+  swap_sample_yz_axes = config['swap_sample_yz_axes']
+  use_simplified_mesh = config['mesh_simplification']
+  COLLAPSE_Y_AXIS = collapse_y_axis
+  SWAP_YZ = swap_sample_yz_axes
+  # project structure 
+  # <path_to_sequence_1>/
+  #  trial_config.json
+  #  frames/
+  #    0/
+  #      0.pkl
+  #      0.obj
+  all_frame_samples = torch.zeros(num_frames, num_samples, 4)
+  frames_folder = trial_folder / "frames"
+  for i in tqdm(range(num_frames), desc="Sampling Frames"):
+    frame_folder = frames_folder / str(i)
+    obj_file = frame_folder / f'{i}.obj'
+    if use_simplified_mesh:
+      obj_file = frame_folder / f'{i}_s.obj'
+    samples, sdf = sample_single_mesh(obj_file, num_samples)
+    pt_output_file = frame_folder / "samples.pt"
+    samples = samples.reshape((1, num_samples, 3))
+    sdf = sdf.reshape((1, num_samples))
+    pt_data = to_pt_tensor(samples, sdf)
+    save_pt_tensor(pt_data, pt_output_file)
+    all_frame_samples[i] = pt_data
+  
+  all_frames_pt_file = trial_folder / "samples.pt"
+  save_pt_tensor(all_frame_samples, all_frames_pt_file)
+  
+  
+
+
+
 
 def main():
   
   # # load the pickle file
-  pickle_path = sys.argv[1]
+  # pickle_path = sys.argv[1]
   # pickle_path = "/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/simulation/blender/scripts/data/tank_2d_motion_2024-11-02_21-11-47/tank_2d_motion_2024-11-02_21-11-47_simplified.pkl"
   # # pickle_path = "/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/simulation/blender/scripts/meshes/tank_2d_motion_2024-11-02_13-48-16/tank_2d_motion_2024-11-02_13-48-16.pkl"
-  n = int(sys.argv[2])
+  # n = int(sys.argv[2])
   # pickle_path = "/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/simulation/blender/scripts/data/tank_2d_motion_2024-11-02_23-28-02/tank_2d_motion_2024-11-02_23-28-02_simplified.pkl"
   # n = 1000
-  sample_and_save(pickle_path, n)
+  # sample_and_save(pickle_path, n)
 
   # single mesh test
   # obj_file = '/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/simulation/blender/scripts/stanford-bunny.obj'
   # n = 10000
   # sample_and_save_single_mesh(obj_file, n)
+
+  trial_folder = sys.argv[1]
+  trial_folder = pathlib.Path(trial_folder)
+  sample_trial(trial_folder)
 
 
 if __name__ == "__main__":

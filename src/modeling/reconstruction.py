@@ -1024,6 +1024,31 @@ def test_auto_decoder(embeddings=None):
     np_embed = embeddings.detach()
     plot_embeddings(np_embed)
 
+def test_joint_sdfdhnode():
+  model_file_path = "/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/modeling/models/sdfdhnode_joint_sdf_dhnode_joint_2024-11-26-07-03-40.pt"
+
+  frames = 200
+  embedding_len = 8
+  z = nn.Embedding(frames, embedding_len * 2)
+
+  sdf_mlp = DeepSDFDecoder(
+    layer_dims=[256,256,256,128,128,128],
+    input_dim=(embedding_len * 2 + 3),
+    output_dim=1)
+  deep_sdf = AutoDecoder(frames, embedding_len, sdf_mlp, embedding_w=z.weight)
+  
+  ode_mlp = MLP(
+    input_dim=embedding_len * 2,
+    output_dim=1, 
+    layer_dims=[128, 128]
+    )
+  integrator = RK4(ode_mlp)
+  dhnode = DHNODE(ode_mlp)
+  ode_model = DHNODEIntegrator(dhnode, integrator, z)
+
+  model = SDFDHNODEjoint(ode_model, deep_sdf, z)
+
+  model.load(model_file_path)
 
 
 
@@ -1037,7 +1062,8 @@ def main():
   # train_deep_sdf_auto_decoder()
   # test_auto_decoder()
   # train_odenet()
-  joint_train_deep_sdf_odenet()
+  # joint_train_deep_sdf_odenet()
+  test_joint_sdfdhnode()
 
   
   

@@ -1,0 +1,55 @@
+{
+  "training_data_folder": "/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/simulation/blender/scripts/trials/2024-12-02_15-52-40",
+  "training_data_config_file_name": "trials_config.json",
+  "embedding_length": 8,
+  "auto_decoder_config": {
+    "hidden_layer_dimensions": [512, 512, 512, 256, 256, 256],
+    "h_activation": "relu",
+    "o_activation": "tanh",
+    "name": "auto_decoder"
+  },
+  "latent_ode_config": {
+    "hidden_dimensions": [128, 128],
+    "h_activation": "relu",
+    "o_activation": "tanh",
+    "name": "latent_ode",
+    "alpha": 1.0,
+    "gamma": 1.0,
+    "order": 2
+  },
+  "training_configuration": {
+    "device": "cpu",
+    "num_epochs": 10,
+    "sdf_samples_per_frame": 300,
+    "frames_per_batch": 32,
+    "sdf_batches_per_ode_update": 5, 
+    "learning_rate": 0.0001,
+    "weighted_sdf_sampling": true,
+    "segment_schedule": [
+      {
+        "p": 0.1,
+        "seg_length": 4,
+        "sampled_frames": 4
+      },
+      {
+        "p": 0.2,
+        "seg_length": 8,
+        "sampled_frames": 4
+      },
+      {
+        "p": 0.3,
+        "seg_length": 16,
+        "sampled_frames": 8
+      },
+      {
+        "p": 1.0,
+        "seg_length": 32,
+        "sampled_frames": 16
+      }
+    ]
+
+
+
+  }
+
+}

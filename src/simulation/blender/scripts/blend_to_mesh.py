@@ -9,6 +9,7 @@ import os
 import bmesh
 import sys
 import subprocess
+import json
 
 
 print(f'Python Path: {sys.executable}')
@@ -30,8 +31,31 @@ import bpy
 import bmesh
 import numpy as np
 from tqdm import tqdm
+import argparse
 
-def get_mesh_sequence(use_first_frame_bounding_box=True):
+def parse_args():
+  argv = sys.argv
+  if "--" in argv:
+    argv = argv[argv.index("--") + 1:]
+  else:
+    argv = []
+  parser = argparse.ArgumentParser(description="Simulate fluid tank")
+
+  # get the cwd
+  cwd = os.getcwd()
+
+  relative_path = os.path.join(cwd, "data")
+  parser.add_argument("--input_folder", 
+                      type=str, 
+                      help="input folder with the simulation data and blender file",
+                      )
+  args = parser.parse_args(argv)
+  return args
+args = parse_args()
+
+def get_mesh_sequence(
+      config,
+      use_first_frame_bounding_box=True):
     """
     Extracts and transforms the fluid mesh from each frame in Blender,
     ensuring it fits within the -1 to 1 cube uniformly across all frames
@@ -46,11 +70,17 @@ def get_mesh_sequence(use_first_frame_bounding_box=True):
     mesh_sequence = []
     last_frame = bpy.context.scene.frame_end
 
+    
+
     # Define object names for easy reference
-    fluid_surface_name = 'fluid_surface'
-    fluid_object_name = 'Fluid'
-    container_name = 'Container'
-    fluid_domain_name = 'Domain'
+    # fluid_surface_name = 'fluid_surface'
+    # fluid_object_name = 'Fluid'
+    # container_name = 'Container'
+    # fluid_domain_name = 'Domain'
+    fluid_surface_name = config['fluid_surface_name']
+    fluid_object_name = config['fluid_object_name']
+    container_name = config['container_object_name']
+    fluid_domain_name = config['domain_object_name']
 
     # Ensure the objects exist in the scene
     if fluid_surface_name not in bpy.data.objects:
@@ -122,9 +152,9 @@ def get_mesh_sequence(use_first_frame_bounding_box=True):
     fluid_object_dimensions = fluid_object.dimensions
 
     # use the fluid domain vertical dimension, just for the vertical component 
-    print(f"Container dimensions: {container_dimensions}")
-    print(f"Domain dimensions: {domain_dimensions}")
-    print(f"Fluid object dimensions: {fluid_object_dimensions}")
+    # print(f"Container dimensions: {container_dimensions}")
+    # print(f"Domain dimensions: {domain_dimensions}")
+    # print(f"Fluid object dimensions: {fluid_object_dimensions}")
     container_dimensions[2] = domain_dimensions[2]
     #use the fluid object x dimension for the x component
     container_dimensions[0] = fluid_object_dimensions[0]
@@ -148,6 +178,9 @@ def get_mesh_sequence(use_first_frame_bounding_box=True):
 
     # Step 3: Iterate Through All Frames and Transform Meshes
     for i in tqdm(range(1, last_frame + 1), desc="Extracting Meshes from Frames"):
+        
+
+
         # Set the current frame
         bpy.context.scene.frame_set(i)
 
@@ -251,26 +284,70 @@ def read_from_pickle(pickle_file):
 
 
 
+def mesh_to_obj(mesh, output_file, name="frame"):
+  with open(output_file, "w") as f:
+    f.write(f"o {name}\n")
+    for v in mesh['vertices']:
+      f.write(f"v {v[0]} {v[1]} {v[2]}\n")
+    for face in mesh['faces']:
+      f.write(f"f {' '.join(str(v+1) for v in face)}\n")
 
+def load_config_file(config_file_path):
+  with open(config_file_path, "r", encoding="utf-8") as f:
 
+    config = json.load(f)
+  return config
 
-def blend_to_mesh(blend_file_path, output_folder):
+def blend_to_mesh(blend_file_path, output_folder, config_file_path):
    
     bpy.ops.wm.open_mainfile(filepath=str(blend_file_path))
 
     bpy.context.scene.frame_set(0)
     bpy.ops.object.mode_set(mode='OBJECT')
 
-    mesh_sequence = get_mesh_sequence()
+    config = load_config_file(config_file_path)
+
+    mesh_sequence = get_mesh_sequence(config)
+
+
+
+
+    # create a new folder called frames in the output folder
+    mesh_folder = output_folder / "frames"
+    mesh_folder.mkdir(exist_ok=True)
+    # create a new folder for each frame called i
+    # save the mesh as an obj file in that folder
+    # save the velocity and impulse as as a json file in that folder
+    for i, mesh in enumerate(mesh_sequence):
+        frame_folder = mesh_folder / str(i)
+        frame_folder.mkdir(exist_ok=True)
+        # save the mesh as an obj file
+        obj_path = frame_folder / f"{i}.obj"
+        mesh_to_obj(mesh, obj_path, name=f"frame_{i}")
+        # save mesh as pkl
+        mesh_output_file = frame_folder / f"{i}.pkl"
+        with open(mesh_output_file, "wb") as f:
+            pickle.dump(mesh, f)
+    
+    # get the velocity and impulse for each frame and save as pkl file
+    velocities = [mesh['velocity'] for mesh in mesh_sequence]
+    impulses = [mesh['impulse'] for mesh in mesh_sequence]
+    dynamics = {
+        'velocities': velocities,
+        'impulses': impulses
+    }
+    velocities_output_file = output_folder / "dynamics.pkl"
+    with open(velocities_output_file, "wb") as f:
+        pickle.dump(dynamics, f)
 
     # save all the meshes as obj files in the output folder
     # each mesh should just have its name as the frame number
-    output_folder.mkdir(exist_ok=True)
+    # output_folder.mkdir(exist_ok=True)
     blend_file = pathlib.Path(blend_file_path)
-    output_file = blend_file.with_suffix(".pkl")
+    output_file = blend_file.with_name(f"mesh_sequence.pkl")
     write_to_pickle(mesh_sequence, output_file)
     # write_obj_frames(mesh_sequence, mesh_folder)
-    print(f"Saved mesh sequence to {output_file}")
+    # print(f"Saved mesh sequence to {output_file}")
     # read from pickle
     # mesh_sequence_1 = read_from_pickle(output_file)
 
@@ -284,11 +361,14 @@ def main():
       addons.keys()
       return
     
-    output_folder = sys.argv[-1]
-    output_folder = pathlib.Path(output_folder)
+    input_folder = pathlib.Path(args.input_folder)
+    config_file_path = input_folder / "trial_config.json"
+    # config_file_path = "/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/simulation/blender/scripts/test.json"
+    output_folder = input_folder
+
     # output_folder_name / output_folder_name.blend
-    blend_file = output_folder / f"{output_folder.stem}.blend"
-    blend_to_mesh(blend_file, output_folder)
+    blend_file = input_folder / f"{input_folder.stem}.blend"
+    blend_to_mesh(blend_file, output_folder, config_file_path)
 
     
 
