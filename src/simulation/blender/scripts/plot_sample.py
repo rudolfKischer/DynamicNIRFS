@@ -171,7 +171,7 @@ def plot_mesh_sequence(mesh_sequence, sample_points=None, sample_sdf_values=None
                     sample_points[frame],
                     scalars=sample_sdf_values[frame],
                     cmap="coolwarm",
-                    clim=(-0.1, 0.01),
+                    clim=(-0.1, 0.1),
                     point_size=15,
                     name="sample_points",
                     # render_points_as_spheres=True,

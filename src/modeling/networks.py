@@ -8,7 +8,8 @@ import torchode
 
 activation_functions = {
   "relu": nn.ReLU(),
-  "tanh": nn.Tanh()
+  "tanh": nn.Tanh(),
+  "identity": nn.Identity(),
 }
 
 def create_linear_layers(dimensions: List[int], activation: str="relu", output_activation: str="tanh"):
@@ -55,7 +56,7 @@ class AutoDecoder(nn.Module):
   """
 
   def __init__(self, 
-              config: DecoderConfig
+              config: AutoDecoderConfig
               ):
     """
     
@@ -64,6 +65,8 @@ class AutoDecoder(nn.Module):
       config (DecoderConfig): The configuration for the decoder network.
     """
     super(AutoDecoder, self).__init__()
+    # type check config
+    assert isinstance(config, AutoDecoderConfig)
     self.config = config
     # unpack config into class attributes
     for key, value in config.__dict__.items():
@@ -71,10 +74,22 @@ class AutoDecoder(nn.Module):
     input_dim = 3 + self.embedding_length
     output_dim = 1
     dims = [input_dim] + self.hidden_dimensions + [output_dim]
+
     self.layers = create_linear_layers(dims, self.h_activation, self.o_activation)
   
   def forward(self, x: torch.Tensor, latent: torch.Tensor):
+
+    # concatenate the expanded latent vector with x
+    # normalize latent
+    # latent = latent / latent.norm(dim=-1, keepdim=True)
+    # set latent to 0 for now
+    # new_latent = torch.zeros_like(latent)
+
+  
+
     x = torch.cat([x, latent], dim=-1)
+    # print(f'decoder input shape: {x.shape}')
+
     return self.layers(x)
   
   def save(self, path: str):
@@ -110,18 +125,34 @@ class LatentODE(nn.Module):
   and outputs the potential energy of the latent space as a scalar.
   """
 
+
+
   def __init__(self, config: LatentODEConfig):
     super(LatentODE, self).__init__()
+    # type check config
+    assert isinstance(config, LatentODEConfig)
     self.config = config
     # unpack config into class attributes
     for key, value in config.__dict__.items():
       setattr(self, key, value)
-    input_dim = self.embedding_length * self.order
+    input_dim = self.embedding_length #* self.order
     output_dim = 1
-    self.alpha_M = nn.Parameter(torch.full((self.embedding_length,), self.alpha))
-    self.gamma_M = nn.Parameter(torch.full((self.embedding_length,), self.gamma))
+    self.alpha_M = torch.full((self.embedding_length,), self.alpha)
+    self.gamma_M = torch.full((self.embedding_length,), self.gamma)
+
+    # disable make alpha nd gamma non trainable
+    self.alpha_M.requires_grad_(False)
+    self.gamma_M.requires_grad_(False)
+
+
     dims = [input_dim] + self.hidden_dimensions + [output_dim]
     self.layers = create_linear_layers(dims, self.h_activation, self.o_activation)
+
+    # initialize the weights of the energy network
+    # for layer in self.layers:
+    #   if isinstance(layer, nn.Linear):
+    #     nn.init.xavier_normal_(layer.weight)
+    #     nn.init.zeros_(layer.bias)
   
   def forward_2(self, t: torch.Tensor, x: torch.Tensor):
     """
@@ -130,8 +161,10 @@ class LatentODE(nn.Module):
     V: potential energy
     """
     # x.shape = (batch_size, 2 * embedding_length)
-    p = x[:, :self.embedding_length]
-    q = x[:, self.embedding_length:]
+    q = x[:, :self.embedding_length]
+    p = x[:, self.embedding_length:]
+    # normalize q
+    q = q / q.norm(dim=-1, keepdim=True)
     V = self.layers(q)
 
     # calculate derivatives
@@ -145,15 +178,16 @@ class LatentODE(nn.Module):
 
     dq = self.alpha_M.square() * p
     dp = -dV_dq - self.gamma_M.square() * dq
-    return torch.cat([dp, dq], dim=-1)
+    return torch.cat([dq, dp], dim=-1)
 
   def forward(self, t: torch.Tensor, x: torch.Tensor):
     with torch.set_grad_enabled(True):
       x.requires_grad_(True)
       if self.order == 2:
-        self.forward_2(t, x)
+        result = self.forward_2(t, x)
       else:
         raise NotImplementedError(f"Order {self.order} is not implemented.")
+    return result
   
   def save(self, path: str):
     save_model(self.config, self.state_dict(), path)
