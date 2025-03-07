@@ -171,7 +171,7 @@ def plot_mesh_sequence(mesh_sequence, sample_points=None, sample_sdf_values=None
                     sample_points[frame],
                     scalars=sample_sdf_values[frame],
                     cmap="coolwarm",
-                    clim=(-0.1, 0.01),
+                    clim=(-0.1, 0.1),
                     point_size=15,
                     name="sample_points",
                     # render_points_as_spheres=True,
@@ -444,7 +444,30 @@ def plot(pickle_file, pt_file, negative_sdf_only=True):
     # mask = sdf_values >= 0
     # samples[mask] = 0
   plot_mesh_sequence(mesh_sequence, samples, sdf_values)
+
+def plot_trial(trial_folder):
+  pickle_file = trial_folder / ("mesh_sequence.pkl")
+  pt_file = trial_folder / ("samples.pt")
+  dynamics_file = trial_folder / ("dynamics.pkl")
+  # open the pickle_file with the mesh sequence
+  mesh_sequence = load_mesh_sequence(pickle_file)
+  # open the pt file with the samples
+  pt_tensor = load_from_pt_tensor(pt_file)
+  samples, sdf_values = extract_samples(pt_tensor)
+  # open the dynamics file
+  with open(dynamics_file, "rb") as f:
+    dynamics = pickle.load(f)
+  
+  # go through each frame in the mesh sequence
+  velocties = dynamics["velocities"]
+  impulses = dynamics["impulses"]
+  for i, frame in enumerate(mesh_sequence):
+    frame["velocity"] = velocties[i]
+    frame["impulse"] = impulses[i]
+  plot_mesh_sequence(mesh_sequence, samples, sdf_values)
    
+
+
 def main():
   # folder_path = sys.argv[1]
   # pickle_file, pt_file = get_pkl_and_pt_files(folder_path)
@@ -472,9 +495,12 @@ def main():
   # plot(pickle_file, pt_file)
 
   # test code reconstruction
-  pt_file = "/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/modeling/test_eval.pt"
-  pickle_file = "/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/simulation/blender/scripts/data/tank_2d_motion_2024-11-02_23-28-02/tank_2d_motion_2024-11-02_23-28-02_simplified.pkl"
-  plot(pickle_file, pt_file)
+  # pt_file = "/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/modeling/test_eval.pt"
+  # pickle_file = "/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/simulation/blender/scripts/data/tank_2d_motion_2024-11-02_23-28-02/tank_2d_motion_2024-11-02_23-28-02_simplified.pkl"
+  # plot(pickle_file, pt_file)
+
+  trial_folder = pathlib.Path(sys.argv[1])
+  plot_trial(trial_folder)
 
 
 

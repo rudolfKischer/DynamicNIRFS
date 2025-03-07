@@ -175,3 +175,13 @@ cython_debug/
 *.bbox
 **/data/
 *.zip
+
+
+src/simulation/blender/scripts/trials/
+src/modeling/experiments/*
+*.obj
+*.pt 
+*.prof
+*.gif
+
+src/simulation/blender/scripts/status.txt

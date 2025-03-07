@@ -3,9 +3,14 @@ import pymeshlab
 import tqdm
 import pickle
 import unpack_pkl
+import json
+import sys
 
 
-def simplify_mesh(mesh_file, output_file, volume_loss_threshold=0.1):
+def simplify_mesh(mesh_file,
+                   output_file,
+                   target_perc=0.1,
+                   volume_loss_threshold=0.1):
    # we want to simplify the mesh, while preserving the volume and topology
   ms = pymeshlab.MeshSet()
   ms.load_new_mesh(str(mesh_file))
@@ -13,7 +18,7 @@ def simplify_mesh(mesh_file, output_file, volume_loss_threshold=0.1):
   vert_count = ms.current_mesh().vertex_number()
   face_count = ms.current_mesh().face_number()
   ms.meshing_decimation_quadric_edge_collapse(
-    targetperc = 0.1,
+    targetperc = target_perc,
     optimalplacement=True,
     preserveboundary=True,
     preservetopology=True,
@@ -127,14 +132,42 @@ def unpack_and_simplify(input_sim_folder):
     f.unlink()
   temp_simplified_folder.rmdir()
 
-  
+
+def load_json(json_file):
+  with open(json_file, "r") as f:
+    data = json.load(f)
+  return data
+
+def simplify_trial(trial_folder):
+
+  config_file = trial_folder / "trial_config.json"
+  config = load_json(config_file)
+  target_p = config['mesh_simplification_target_percentage']
+  num_frames = config['num_frames']
+
+  frame_folder = trial_folder / "frames"
+
+  for i in tqdm.tqdm(range(num_frames), desc="Simplifying Trial"):
+    input_frame_obj = frame_folder / f"{i}" / f"{i}.obj"
+    output_frame_obj = frame_folder / f"{i}" / f"{i}_s.obj"
+    simplify_mesh(input_frame_obj, output_frame_obj, target_perc=target_p)
+  # print(f"Simplified {num_frames} frames in {trial_folder}")
+
+
+
 
 
 
 
 def main():
-  folder_path = '/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/simulation/blender/scripts/meshes/tank_2d_motion_2024-11-02_19-31-25'
-  unpack_and_simplify(folder_path)
+  # folder_path = '/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/simulation/blender/scripts/meshes/tank_2d_motion_2024-11-02_19-31-25'
+  # unpack_and_simplify(folder_path)
+
+  trial_folder = sys.argv[1]
+  trial_folder = pathlib.Path(trial_folder)
+  simplify_trial(trial_folder)
+
+
 
 if __name__ == "__main__":
   main()

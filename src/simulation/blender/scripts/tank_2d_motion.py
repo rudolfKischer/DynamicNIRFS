@@ -11,6 +11,7 @@ import argparse
 import re
 import threading
 import time
+import json
 from datetime import datetime
 
 import bmesh
@@ -24,22 +25,6 @@ bpy.app.debug_events = False
 
 
 from logs import logger, BlenderLogInterCeptor
-
-config = {
-  "flip_fluid_blender_addon_name": "flip_fluids_addon",
-  "flip_fluid_version": (1,8,1),
-  "blender_version": ((3,1),(4,2)),
-
-  # flip fluid parameters
-  "domain_dimensions": (24,2,12),
-  "domain_object_name": "Domain",
-  "domain_resolution":100,
-  "fluid_dimensions": (12,2,5),
-  "fluid_position": (0,0,-3.5),
-  "fluid_object_name": "Fluid",
-  "num_frames": 200,
-  "simulation_method": "FLIP",
-}
 
 def parse_args():
   argv = sys.argv
@@ -58,14 +43,27 @@ def parse_args():
                       help="Output folder for simulation data",
                       default=relative_path,
                       )
+  parser.add_argument("--config_file",
+                      type=str,
+                      help="Path to the configuration file"
+                      )
   args = parser.parse_args(argv)
   return args
 args = parse_args()
+config_file = args.config_file
+# check if the config file exists
+if not os.path.exists(config_file):
+  logger.error(f"Config file does not exist: {config_file}")
+  raise FileNotFoundError(f"Config file does not exist: {config_file}")
+
+with open(config_file, "r") as f:
+  # may be invalid json
+  config = json.load(f)
 
 
 
 def str_to_version(version: str):
-  return tuple(map(int, version.split(".")))
+  return list(map(int, version.split(".")))
 def version_to_str(version: tuple):
   return ".".join(map(str, version))
 
@@ -108,6 +106,7 @@ def initialize_fluid_domain():
   domain_object.flip_fluid.object_type = 'TYPE_DOMAIN'
   domain_object.flip_fluid.domain.simulation.resolution = config["domain_resolution"]
   domain_object.flip_fluid.domain.simulation_method = 'FLIP'
+  domain_object.flip_fluid.domain.advanced.min_max_time_steps_per_frame.value_min = config["domain_min_substeps"]
   logger.info(f"Domain created. Parameters: scale={config['domain_dimensions']}, resolution={config['domain_resolution']}, frame_end={config['num_frames']}, simulation_method={config['simulation_method']}") 
 
 
@@ -139,84 +138,87 @@ def remove_container_lid():
 
 def initialize_fluid_container():
   # add a rectangular fluid container
-  # make it the same height as the fluid domain but half the width on axis
+  # make it the same height as the fluid domain but the width of the fluid dimenstions
   # set its viewport display to wireframe
-  # remove the top face
-  # add a modifier giving it a solidify modifier
-  bpy.ops.mesh.primitive_cube_add(size=1, location=(0,0,0), scale=config["domain_dimensions"])
-  bpy.ops.transform.resize(value=(0.5,1,1))
+  scale = config["fluid_dimensions"].copy()
+  scale[2] = config["domain_dimensions"][2]
+  bpy.ops.mesh.primitive_cube_add(size=1, location=(0,0,0), scale=scale)
+  # bpy.ops.transform.resize(value=(0.5,1,1))
   container_object = bpy.context.active_object
   bpy.ops.flip_fluid_operators.flip_fluid_add()
   container_object.flip_fluid.object_type = 'TYPE_OBSTACLE'
-  container_object.name = "Container"
+  container_object.name = config["container_object_name"]
   container_object.display_type = 'WIRE'
+  container_object.flip_fluid.obstacle.is_enabled = True
+  container_object.flip_fluid.obstacle.is_inverse = True
 
-  # remove the top face
-  remove_container_lid()
-
-  bpy.ops.object.modifier_add(type='SOLIDIFY')
-  bpy.context.object.modifiers["Solidify"].thickness = -4.0
-
+  bpy.data.objects["Container"].flip_fluid.obstacle.is_inversed = True
   # add it to the fluid sim
-
-  logger.info(f"Container object created. Parameters: scale={config['fluid_dimensions']}")
-
 
 
 
 def add_container_motion():
 
-  # we want to move only along the x axis
-  # the first key frame should be at frame 1, and should be at its original position
-  # we will work with percentages of the total number of frames
-  container_velocity = 6.0
-  # fps is 24
-  # we want to pick random positions on the domain
-  # the domain is the length , well the size of the fluid domain / 2 because we scaled the container
+  frame_impulses = config["frame_impulses"]
+  # frame_impules = [ [f_no, [x, y, z]], ...]
+  # the frame impulses gives us the induced velocity at a certain frame
+  # the frame impulses are only a subset of the frames
+
+  # we want to calculate position keyframes for the container
+  # to do this, we need to know the position and velocity of the container at the previous keyframe
   
-  p_k = 0.05 # percentage of frames we want to be a keyframe position
-  key_frames = [(1, 0)]
-  x_domain = config["domain_dimensions"][0] // 4
-  time_per_frame = 1/24
+  # we will make our keyframes the same frames as the frame impulses
+  # but we will also add keyframes at the start and end of the simulation, if they are not already in the frame impulses
+  frame_impulses = sorted(frame_impulses, key=lambda x: x[0])
+  # get the start and end frames
+  first_frame = frame_impulses[0][0]
+  last_frame = frame_impulses[-1][0]
 
-  down_time = (5, 30)
-
-  i = 2
-  while i < config["num_frames"]:
-    if random.random() < p_k:
-      # get a random position
-      frame_delta = i - key_frames[-1][0]
-      delta_time = frame_delta * time_per_frame
-      max_distance = container_velocity * delta_time
-      prev_x = key_frames[-1][1]
-      x_min = max(prev_x - max_distance, -x_domain)
-      x_max = min(prev_x + max_distance, x_domain)
-      x = random.uniform(x_min, x_max)
-      # get the frame
-      frame = int(i)
-      key_frames.append((frame, x))
-      cur_down_time = random.randint(down_time[0], down_time[1])
-      i += cur_down_time
-      key_frames.append((int(i), x))
-    else:
-      i += 1
-
+  if first_frame != 1:
+    frame_impulses.insert(0, (1, [0,0,0]))
+  if last_frame != config["num_frames"]:
+    frame_impulses.append((config["num_frames"], [0,0,0]))
   
-  # log the key frames
-  logger.info(f"Key frames: {key_frames}")
-  # set the key frames
+  init_pos = [0,0,0]
+  init_vel = frame_impulses[0][1]
+  position_keyframes = [(1, init_pos)]
+  frame_t_delta = 1 / bpy.context.scene.render.fps
+
+  prev_pos = init_pos
+  prev_vel = init_vel
+  prev_frame = frame_impulses[0][0]
+  for i in range(1, len(frame_impulses)):
+    frame, vel = frame_impulses[i]
+    f_delta = frame - prev_frame
+    t_delta = f_delta * frame_t_delta
+    pos = [prev_pos[j] + prev_vel[j] * t_delta for j in range(3)]
+    position_keyframes.append((frame, pos))
+    prev_pos = pos
+    prev_vel = [prev_vel[j] + vel[j] for j in range(3)]
+    prev_frame = frame
+  
+  # set the keyframes
   container_object = bpy.data.objects["Container"]
-  for frame, x in key_frames:
-    container_object.location.x = x
+  # log the key frames
+  for frame, pos in position_keyframes:
+    container_object.location = pos
     container_object.keyframe_insert(data_path="location", frame=frame)
     # set interpolation to linear
     for fcurve in container_object.animation_data.action.fcurves:
       for kf in fcurve.keyframe_points:
         kf.interpolation = 'LINEAR'
-    
-  logger.info(f"Container motion keyframes set: {key_frames}")
+  
+  logger.info(f"Container motion keyframes set: {position_keyframes}")
+
+
+
+
 
 def initialize_scene():
+
+  # set frame rate
+  bpy.context.scene.render.fps = int(config["fps"])
+  bpy.context.scene.render.fps_base = 1
 
   # set the blender scene end frame
   bpy.context.scene.frame_end = config["num_frames"]
@@ -311,6 +313,8 @@ def bake_simulation(output_file_path):
   bpy.data.objects[config["domain_object_name"]].flip_fluid.domain.cache_directory = bpy.path.relpath(cache_dir)
   # bake the simulation
   logger.info(f"Baking simulation")
+  # reset the baked fluid simulation before baking
+  bpy.ops.flip_fluid_operators.reset_bake()
   bpy.ops.flip_fluid_operators.bake_fluid_simulation_cmd()
   logger.info(f"Simulation baked")
 
@@ -333,6 +337,10 @@ def save_scene(output_file_path):
       raise e
   # save the scene
   # include the date and time in the output file name
+
+  # if the output file exists, delete it
+  if os.path.exists(output_file_path):
+    os.remove(output_file_path)
   
 
   bpy.ops.wm.save_as_mainfile(filepath=output_file_path)
@@ -340,9 +348,11 @@ def save_scene(output_file_path):
   logger.info(f"Scene saved to: {os.path.join(args.output_folder, 'tank_2d_motion.blend')}")
 
 
-def create_new_trial(output_folder):
+
+def create_new_trial(output_folder, trial_name=None):
   # use the folder name as the trial name
-  trial_name = os.path.basename(output_folder)
+  if trial_name is None:
+    trial_name = os.path.basename(output_folder)
   # output_folder / stamp / stamp.blend
   trial_folder = output_folder
   output_file_path = os.path.join(trial_folder, f"{trial_name}.blend")
@@ -358,6 +368,11 @@ def create_new_trial(output_folder):
   clear_scene()
   initialize_scene()
   save_scene(output_file_path)
+  config_file_path = os.path.join(trial_folder, "trial_config.json")
+  # save to json, make sure utf-8 encoding is used
+  with open(config_file_path, "w", encoding="utf-8") as f:
+    json.dump(config, f)
+
   bake_simulation(output_file_path)
 
   log_capture.close()

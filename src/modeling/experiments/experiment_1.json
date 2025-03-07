@@ -1,0 +1,75 @@
+{
+  "training_data_folder": "/Users/rudolfkischer/MCGILL/FALL2024/Comp 400/repositories/DynamicNIRFS/src/simulation/blender/scripts/trials/2024-12-02_15-52-40",
+  "training_data_config_file_name": "trials_config.json",
+  "embedding_config": {
+    "latent_dimensions": 3,
+    "gauss_init": true,
+    "gauss_mean": 0.0,
+    "gauss_std": 0.4
+  },
+  "auto_decoder_config": {
+    "hidden_dimensions": [128,128,128],
+    "h_activation": "tanh",
+    "o_activation": "tanh",
+    "name": "auto_decoder"
+  },
+  "latent_ode_config": {
+    "hidden_dimensions": [32,32],
+    "h_activation": "relu",
+    "o_activation": "tanh",
+    "name": "latent_ode",
+    "alpha": 1.00,
+    "gamma": 0.001,
+    "order": 2
+  },
+  "ode_solver_config": {
+    "method": "dopri5",
+    "rtol": 1e-3,
+    "atol": 1e-6
+  },
+  "training_configuration": {
+    "device": "cpu",
+    "data_loader_workers": 4,
+    "num_epochs": 40,
+    "sdf_samples_per_frame": 30,
+    "frames_per_batch": 32,
+    "sdf_batches_per_ode_update": 1, 
+    "learning_rate": 0.01,
+    "ode_init_lambda": 1.00,
+    "ode_final_lambda": 0.0,
+    "sdf_lambda": 1.00,
+    "weighted_sdf_sampling": true,
+    "dataset_in_memory": false,
+    "segment_schedule": [
+      {
+        "p": 0.05,
+        "seg_length": 4,
+        "sampled_frames": 4
+      },
+      {
+        "p": 0.5,
+        "seg_length": 4,
+        "sampled_frames": 4
+      },
+      {
+        "p": 0.6,
+        "seg_length": 4,
+        "sampled_frames": 4
+      },
+      {
+        "p": 0.8,
+        "seg_length": 4,
+        "sampled_frames": 4
+      },
+      {
+        "p": 1.0,
+        "seg_length": 8,
+        "sampled_frames": 8
+      }
+    ]
+
+
+
+  }
+
+}
